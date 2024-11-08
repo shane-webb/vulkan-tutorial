@@ -1,0 +1,8 @@
+#executables
+.exe
+/bin
+
+# debug files
+.pbd
+
+#
