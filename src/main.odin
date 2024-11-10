@@ -14,7 +14,17 @@ GLOBAL_RUNTIME_CONTEXT: runtime.Context
 AppContext :: struct {
     dbg_messenger: vk.DebugUtilsMessengerEXT,
     instance:      vk.Instance,
+    phys_device:   vk.PhysicalDevice,
     window:        ^SDL.Window,
+}
+
+// bundled to simplify querying for the different families at different times
+// wrapped with Maybe because 0 is technically a valid queue family value
+QueueFamilyIndicies :: struct {
+    // Maybe(T), a union that is _either_ T or nil
+    // Similar to Option(T) or Result(T) in other languages
+    // use '.?' to get the value of a Maybe in a "v, ok" format
+    graphics_family: Maybe(u32),
 }
 
 
@@ -77,7 +87,7 @@ main :: proc() {
     log.destroy_console_logger(logger)
 }
 
-// ========================================= VULKAN =========================================
+// ========================================= VULKAN INSTANCE =========================================
 init_vulkan :: proc(ctx: ^AppContext) {
     vk.load_proc_addresses_global(SDL.Vulkan_GetVkGetInstanceProcAddr())
     assert(vk.CreateInstance != nil, "Vulkan function pointers not loaded")
@@ -88,6 +98,8 @@ init_vulkan :: proc(ctx: ^AppContext) {
     when ENABLE_VALIDATION_LAYERS {
         setup_debug_messenger(ctx)
     }
+
+    pick_physical_device(ctx)
 
     free_all(context.temp_allocator)
 }
@@ -267,6 +279,59 @@ setup_debug_messenger :: proc(ctx: ^AppContext) {
     log.assertf(result == .SUCCESS, "Debug messenger creation failed with result: %v", result)
 } // odinfmt: enable
 
+
+// ========================================= VULKAN DEVICES =========================================
+pick_physical_device :: proc(ctx: ^AppContext) {
+    device_count: u32
+    vk.EnumeratePhysicalDevices(ctx.instance, &device_count, nil)
+    assert(device_count != 0, "Failed to find GPUs with Vulkan support.")
+
+    devices := make([]vk.PhysicalDevice, device_count, context.temp_allocator)
+    vk.EnumeratePhysicalDevices(ctx.instance, &device_count, raw_data(devices))
+
+    // no need for addressable semantics here because d is an opaque handle (not dereferencable)
+    for d in devices {
+        if is_device_suitable(d) {
+            ctx.phys_device = d
+            find_queue_families(d)
+            break
+        }
+    }
+
+}
+
+is_device_suitable :: proc(device: vk.PhysicalDevice) -> b32 {
+    // manually querying for device compatibility
+    //
+    // device_propeties: vk.PhysicalDeviceProperties
+    // device_features: vk.PhysicalDeviceFeatures
+    // vk.GetPhysicalDeviceProperties(device, &device_propeties)
+    // vk.GetPhysicalDeviceFeatures(device, &device_features)
+    //
+    // return device_propeties.deviceType == .DISCRETE_GPU && device_features.geometryShader
+    indicies := find_queue_families(device)
+    _, has_graphics := indicies.graphics_family.?
+
+    return b32(has_graphics)
+}
+
+find_queue_families :: proc(device: vk.PhysicalDevice) -> QueueFamilyIndicies {
+    indicies: QueueFamilyIndicies
+
+    count: u32
+    vk.GetPhysicalDeviceQueueFamilyProperties(device, &count, nil)
+    queue_families := make([]vk.QueueFamilyProperties, count, context.temp_allocator)
+    vk.GetPhysicalDeviceQueueFamilyProperties(device, &count, raw_data(queue_families))
+
+    for fam, i in queue_families {
+        if .GRAPHICS in fam.queueFlags {
+            indicies.graphics_family = u32(i)
+        }
+    }
+
+
+    return indicies
+}
 
 // ========================================= WINDOW =========================================
 init_window :: proc(global_context: ^AppContext) {
