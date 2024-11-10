@@ -3,8 +3,7 @@ package main
 import "base:runtime"
 import "core:log"
 import "core:mem"
-// import SDL "vendor:sdl2"
-import "vendor:glfw"
+import SDL "vendor:sdl2"
 import vk "vendor:vulkan"
 
 WINDOW_WIDTH :: 1920
@@ -13,11 +12,9 @@ WINDOW_HEIGHT :: 1080
 GLOBAL_RUNTIME_CONTEXT: runtime.Context
 
 AppContext :: struct {
-    dbg_messenger:    vk.DebugUtilsMessengerEXT,
-    dbg_messenger_CI: vk.DebugUtilsMessengerCreateInfoEXT,
-    instance:         vk.Instance,
-    // window:           ^SDL.Window,
-    window:           glfw.WindowHandle,
+    dbg_messenger: vk.DebugUtilsMessengerEXT,
+    instance:      vk.Instance,
+    window:        ^SDL.Window,
 }
 
 
@@ -115,23 +112,15 @@ create_instance :: proc(ctx: ^AppContext) {
     }
 
     when ENABLE_VALIDATION_LAYERS {
-        if !check_validation_layer_support() {
-            log.error("The requested validation layers are not supported")
-            return
-        }
-        ctx.dbg_messenger_CI = vk.DebugUtilsMessengerCreateInfoEXT {
-            sType           = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
-            messageSeverity = {.VERBOSE, .INFO, .WARNING, .ERROR},
-            messageType     = {.GENERAL, .VALIDATION, .PERFORMANCE, .DEVICE_ADDRESS_BINDING},
-            pfnUserCallback = vk_messenger_callback,
-            pUserData       = nil,
-        }
+        messenger_CI: vk.DebugUtilsMessengerCreateInfoEXT
+        populate_dbg_messenger_CI(&messenger_CI)
         log.info("Validation layers enabled")
         instance_CI.ppEnabledLayerNames = raw_data(VALIDATION_LAYERS)
         instance_CI.enabledLayerCount = u32(len(VALIDATION_LAYERS))
-        instance_CI.pNext = &ctx.dbg_messenger_CI
+        instance_CI.pNext = &messenger_CI
     } else {
         instance_CI.enabledLayerCount = 0
+        instance_CI.pNext = nil
     }
 
 
@@ -198,7 +187,9 @@ get_required_extensions :: proc(ctx: ^AppContext) -> [dynamic]cstring {
     SDL.Vulkan_GetInstanceExtensions(ctx.window, &count, raw_data(extensions[:]))
 
     when ENABLE_VALIDATION_LAYERS {
-        append(&extensions, vk.EXT_DEBUG_UTILS_EXTENSION_NAME)
+        if check_validation_layer_support() {
+            append(&extensions, vk.EXT_DEBUG_UTILS_EXTENSION_NAME)
+        }
 
     }
 
@@ -212,22 +203,30 @@ vk_messenger_callback :: proc "system" (
     pCallbackData: ^vk.DebugUtilsMessengerCallbackDataEXT,
     pUserData: rawptr,
 ) -> b32 {
-    context = GLOBAL_RUNTIME_CONTEXT
 
-    level: log.Level
-    switch messageSeverity {
-    case {.ERROR}:
-        level = .Error
-    case {.WARNING}:
-        level = .Warning
-    case {.INFO}:
-        level = .Info
-    case:
-        level = .Debug
+    if pCallbackData.pMessage == nil do return false
+    context = (cast(^runtime.Context)pUserData)^
+    if .INFO | .VERBOSE in messageSeverity {
+        log.info(pCallbackData.pMessage)
+    } else if .WARNING in messageSeverity {
+        log.warn(pCallbackData.pMessage)
+    } else if .ERROR in messageSeverity {
+        log.error(pCallbackData.pMessage)
     }
-
-    log.logf(level, "Vulkan[%v]: %s", messageTypes, pCallbackData.pMessage)
     return false
+}
+
+
+// two separate messenger_create_info structs are required if validating instance creation/destruction is desired
+// (and if you're verifying the messenger callback with an instance creation/destruction function,
+// you'll need both in order to see the message)
+populate_dbg_messenger_CI :: proc(create_info: ^vk.DebugUtilsMessengerCreateInfoEXT) {
+    create_info := create_info
+    create_info.sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT
+    create_info.messageSeverity = {.ERROR, .WARNING}
+    create_info.messageType = {.GENERAL, .VALIDATION, .PERFORMANCE}
+    create_info.pfnUserCallback = vk_messenger_callback
+    create_info.pUserData = &GLOBAL_RUNTIME_CONTEXT
 }
 
 
@@ -239,8 +238,6 @@ setup_debug_messenger :: proc(ctx: ^AppContext) {
     vk.CreateDebugUtilsMessengerEXT =
         auto_cast vk.GetInstanceProcAddr(ctx.instance, "vkCreateDebugUtilsMessengerEXT")
     assert(vk.CreateDebugUtilsMessengerEXT != nil, "Create debug messenger proc address is nil")
-    log.info()
-    log.infof("%T", vk.CreateDebugUtilsMessengerEXT)
 
     vk.DestroyDebugUtilsMessengerEXT = 
         auto_cast vk.GetInstanceProcAddr(ctx.instance, "vkDestroyDebugUtilsMessengerEXT")
@@ -263,44 +260,30 @@ setup_debug_messenger :: proc(ctx: ^AppContext) {
     //     severity |= {.VERBOSE}
     // }
 
+    dbg_messenger_CI: vk.DebugUtilsMessengerCreateInfoEXT
+    populate_dbg_messenger_CI(&dbg_messenger_CI)
 
-    result := vk.CreateDebugUtilsMessengerEXT(ctx.instance, &ctx.dbg_messenger_CI, nil, &ctx.dbg_messenger)
+    result := vk.CreateDebugUtilsMessengerEXT(ctx.instance, &dbg_messenger_CI, nil, &ctx.dbg_messenger)
     log.assertf(result == .SUCCESS, "Debug messenger creation failed with result: %v", result)
 } // odinfmt: enable
 
 
 // ========================================= WINDOW =========================================
 init_window :: proc(global_context: ^AppContext) {
-    // SDL.Init({.VIDEO})
-    // SDL.Vulkan_LoadLibrary(nil)
-    // window := SDL.CreateWindow(
-    //     "Odin Vulkan Again",
-    //     SDL.WINDOWPOS_UNDEFINED,
-    //     SDL.WINDOWPOS_UNDEFINED,
-    //     WINDOW_WIDTH,
-    //     WINDOW_HEIGHT,
-    //     {.SHOWN, .VULKAN},
-    // )
-    // if window == nil {
-    //     log.error("Failed to create window")
-    //     return
-    // }
-    // global_context.window = window
-
-    glfw.Init()
-    // tell glfw to not create an OpenGL context
-    glfw.WindowHint(glfw.CLIENT_API, glfw.NO_API)
-    // disable window resizing
-    glfw.WindowHint(glfw.RESIZABLE, 0)
-
-    global_context.window = glfw.CreateWindow(
+    SDL.Init({.VIDEO})
+    window := SDL.CreateWindow(
+        "Odin Vulkan Again",
+        SDL.WINDOWPOS_UNDEFINED,
+        SDL.WINDOWPOS_UNDEFINED,
         WINDOW_WIDTH,
         WINDOW_HEIGHT,
-        "first triangle",
-        nil,
-        nil,
+        {.SHOWN, .VULKAN},
     )
-    glfw.SetWindowUserPointer(global_context.window, global_context)
+    if window == nil {
+        log.error("Failed to create window")
+        return
+    }
+    global_context.window = window
 
 
     // TODO: look into resizing the window
@@ -317,7 +300,7 @@ cleanup :: proc(global_context: ^AppContext) {
     }
 
     assert(vk.DestroyInstance != nil, "nil")
-    // vk.DestroyInstance(global_context.instance, nil)
+    vk.DestroyInstance(global_context.instance, nil)
 
     SDL.Vulkan_UnloadLibrary()
     SDL.DestroyWindow(global_context.window)
