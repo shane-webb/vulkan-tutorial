@@ -12,10 +12,12 @@ WINDOW_HEIGHT :: 1080
 GLOBAL_RUNTIME_CONTEXT: runtime.Context
 
 AppContext :: struct {
-    dbg_messenger: vk.DebugUtilsMessengerEXT,
-    instance:      vk.Instance,
-    phys_device:   vk.PhysicalDevice,
-    window:        ^SDL.Window,
+    dbg_messenger:  vk.DebugUtilsMessengerEXT,
+    instance:       vk.Instance,
+    graphics_queue: vk.Queue,
+    logical_device: vk.Device,
+    phys_device:    vk.PhysicalDevice,
+    window:         ^SDL.Window,
 }
 
 // bundled to simplify querying for the different families at different times
@@ -100,6 +102,8 @@ init_vulkan :: proc(ctx: ^AppContext) {
     }
 
     pick_physical_device(ctx)
+
+    create_logical_device(ctx)
 
     free_all(context.temp_allocator)
 }
@@ -293,7 +297,6 @@ pick_physical_device :: proc(ctx: ^AppContext) {
     for d in devices {
         if is_device_suitable(d) {
             ctx.phys_device = d
-            find_queue_families(d)
             break
         }
     }
@@ -328,9 +331,46 @@ find_queue_families :: proc(device: vk.PhysicalDevice) -> QueueFamilyIndicies {
             indicies.graphics_family = u32(i)
         }
     }
-
-
     return indicies
+}
+
+create_logical_device :: proc(ctx: ^AppContext) {
+    indices := find_queue_families(ctx.phys_device)
+    v, _ := indices.graphics_family.?
+    queue_priority := f32(1.0)
+
+    queue_CI := vk.DeviceQueueCreateInfo {
+        sType            = .DEVICE_QUEUE_CREATE_INFO,
+        queueFamilyIndex = v,
+        queueCount       = 1,
+        pQueuePriorities = &queue_priority,
+    }
+    // empty for now
+    device_features: vk.PhysicalDeviceFeatures
+
+    device_CI := vk.DeviceCreateInfo {
+        sType                 = .DEVICE_CREATE_INFO,
+        pQueueCreateInfos     = &queue_CI,
+        queueCreateInfoCount  = 1,
+        pEnabledFeatures      = &device_features,
+        enabledExtensionCount = 0,
+    }
+
+    when ENABLE_VALIDATION_LAYERS {
+        // these are actually ignored because there is no longer a distinction
+        // between device and instance level validation layers
+        // however they are set just to be compatible with older Vulkan implementations
+        device_CI.enabledLayerCount = len(VALIDATION_LAYERS)
+        device_CI.ppEnabledLayerNames = raw_data(VALIDATION_LAYERS)
+    } else {
+        device_CI.enabledLayerCount = 0
+    }
+
+    result := vk.CreateDevice(ctx.phys_device, &device_CI, nil, &ctx.logical_device)
+    log.assertf(result == .SUCCESS, "Failed to create logical device with result: %v", result)
+
+    // using 0 here because only a single queue was created
+    vk.GetDeviceQueue(ctx.logical_device, v, 0, &ctx.graphics_queue)
 }
 
 // ========================================= WINDOW =========================================
@@ -364,6 +404,7 @@ cleanup :: proc(global_context: ^AppContext) {
         )
     }
 
+    vk.DestroyDevice(global_context.logical_device, nil)
     assert(vk.DestroyInstance != nil, "nil")
     vk.DestroyInstance(global_context.instance, nil)
 
