@@ -32,12 +32,19 @@ QueueFamilyIndicies :: struct {
     present_family:  Maybe(u32),
 }
 
+SwapchainSupportDetails :: struct {
+    capabilities:  vk.SurfaceCapabilitiesKHR,
+    formats:       []vk.SurfaceFormatKHR,
+    present_modes: []vk.PresentModeKHR,
+}
+
 
 logger: log.Logger
 ENABLE_VALIDATION_LAYERS :: #config(ENABLE_VALIDATION_LAYERS, ODIN_DEBUG)
 // VK_LAYER_KRONOS_validation comes from the LunarG SDK
 // there are other validation layers that can be used
 VALIDATION_LAYERS := []cstring{"VK_LAYER_KHRONOS_validation"}
+DEVICE_EXTENSIONS := []cstring{vk.KHR_SWAPCHAIN_EXTENSION_NAME}
 
 main :: proc() {
     track: mem.Tracking_Allocator
@@ -315,10 +322,29 @@ is_device_suitable :: proc(device: vk.PhysicalDevice, ctx: ^AppContext) -> b32 {
     // vk.GetPhysicalDeviceFeatures(device, &device_features)
     //
     // return device_propeties.deviceType == .DISCRETE_GPU && device_features.geometryShader
-    indicies := find_queue_families(device, ctx)
-    _, has_graphics := indicies.graphics_family.?
 
-    return b32(has_graphics)
+    // use the device that can:
+    // - draw graphics
+    // - present grapics
+    // - supports the required extensions (e.g. swapchain)
+    indicies := find_queue_families(device, ctx)
+    extensions_supported := check_device_extension_support(device)
+    _, has_graphics := indicies.graphics_family.?
+    _, has_present := indicies.present_family.?
+
+    swap_chain_adequate: bool
+    if extensions_supported {
+        swap_chain_support := query_swapchain_support(device, ctx)
+        swap_chain_adequate =
+            len(swap_chain_support.formats) != 0 && len(swap_chain_support.present_modes) != 0
+    }
+
+    return(
+        b32(has_graphics) &&
+        b32(has_present) &&
+        b32(extensions_supported) &&
+        swap_chain_adequate \
+    )
 }
 
 find_queue_families :: proc(
@@ -375,11 +401,12 @@ create_logical_device :: proc(ctx: ^AppContext) {
     device_features: vk.PhysicalDeviceFeatures
 
     device_CI := vk.DeviceCreateInfo {
-        sType                 = .DEVICE_CREATE_INFO,
-        pQueueCreateInfos     = raw_data(queue_create_infos),
-        queueCreateInfoCount  = u32(len(queue_create_infos)),
-        pEnabledFeatures      = &device_features,
-        enabledExtensionCount = 0,
+        sType                   = .DEVICE_CREATE_INFO,
+        pQueueCreateInfos       = raw_data(queue_create_infos),
+        queueCreateInfoCount    = u32(len(queue_create_infos)),
+        pEnabledFeatures        = &device_features,
+        enabledExtensionCount   = u32(len(DEVICE_EXTENSIONS)),
+        ppEnabledExtensionNames = raw_data(DEVICE_EXTENSIONS),
     }
 
     when ENABLE_VALIDATION_LAYERS {
@@ -406,6 +433,61 @@ create_surface :: proc(ctx: ^AppContext) {
     log.assertf(result == true, "Failed to create window surface")
 }
 
+// ========================================= VULKAN SWAPCHAIN =========================================
+check_device_extension_support :: proc(device: vk.PhysicalDevice) -> bool {
+    count: u32
+    vk.EnumerateDeviceExtensionProperties(device, nil, &count, nil)
+    available_extensions := make([]vk.ExtensionProperties, count, context.temp_allocator)
+    vk.EnumerateDeviceExtensionProperties(device, nil, &count, raw_data(available_extensions))
+
+    required_extensions := make(map[cstring][^]u8)
+    for ext in DEVICE_EXTENSIONS {
+        required_extensions[ext] = cast([^]u8)ext
+    }
+    log.infof("Required extensions: %#v", required_extensions)
+
+    for &ext in available_extensions {
+        d := raw_data(&ext.extensionName)
+        delete_key(&required_extensions, cstring(d))
+    }
+
+    return len(required_extensions) == 0
+}
+
+query_swapchain_support :: proc(
+    device: vk.PhysicalDevice,
+    ctx: ^AppContext,
+) -> SwapchainSupportDetails {
+    details: SwapchainSupportDetails
+
+    vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(device, ctx.surface, &details.capabilities)
+
+    format_count: u32
+    vk.GetPhysicalDeviceSurfaceFormatsKHR(device, ctx.surface, &format_count, nil)
+    if format_count != 0 {
+        details.formats = make([]vk.SurfaceFormatKHR, format_count)
+        vk.GetPhysicalDeviceSurfaceFormatsKHR(
+            device,
+            ctx.surface,
+            &format_count,
+            raw_data(details.formats),
+        )
+    }
+
+    present_count: u32
+    vk.GetPhysicalDeviceSurfacePresentModesKHR(device, ctx.surface, &present_count, nil)
+    if present_count != 0 {
+        details.present_modes = make([]vk.PresentModeKHR, present_count)
+        vk.GetPhysicalDeviceSurfacePresentModesKHR(
+            device,
+            ctx.surface,
+            &present_count,
+            raw_data(details.present_modes),
+        )
+    }
+
+    return details
+}
 // ========================================= WINDOW =========================================
 init_window :: proc(global_context: ^AppContext) {
     SDL.Init({.VIDEO})
