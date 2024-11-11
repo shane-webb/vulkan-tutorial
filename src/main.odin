@@ -46,6 +46,8 @@ ENABLE_VALIDATION_LAYERS :: #config(ENABLE_VALIDATION_LAYERS, ODIN_DEBUG)
 VALIDATION_LAYERS := []cstring{"VK_LAYER_KHRONOS_validation"}
 DEVICE_EXTENSIONS := []cstring{vk.KHR_SWAPCHAIN_EXTENSION_NAME}
 
+
+// ========================================= MAIN =========================================
 main :: proc() {
     track: mem.Tracking_Allocator
     mem.tracking_allocator_init(&track, context.allocator)
@@ -114,6 +116,7 @@ init_vulkan :: proc(ctx: ^AppContext) {
     create_surface(ctx)
     pick_physical_device(ctx)
     create_logical_device(ctx)
+    create_swap_chain(ctx)
 
     free_all(context.temp_allocator)
 }
@@ -488,6 +491,66 @@ query_swapchain_support :: proc(
 
     return details
 }
+
+choose_swap_surface_format :: proc(
+    available_formats: []vk.SurfaceFormatKHR,
+) -> vk.SurfaceFormatKHR {
+    for av_f in available_formats {
+        if av_f.format == .B8G8R8A8_SRGB && av_f.colorSpace == .SRGB_NONLINEAR {
+            return av_f
+        }
+    }
+    return available_formats[0]
+}
+
+choose_swap_present_mode :: proc(
+    available_present_modes: []vk.PresentModeKHR,
+) -> vk.PresentModeKHR {
+
+    for av_p in available_present_modes {
+        if av_p == .MAILBOX {
+            return av_p
+        }
+    }
+    return vk.PresentModeKHR.FIFO
+}
+
+choose_swap_extent :: proc(
+    capabilities: vk.SurfaceCapabilitiesKHR,
+    ctx: ^AppContext,
+) -> vk.Extent2D {
+    // swap extent is the resolution of the swap chain images
+    // is usually exactly equal to the resolution of the window that is being drawn to, in pixels
+
+    // there's some pixels->coordinates conversion and clamping happening here that should probably be understood
+    // will probably be necessary for when dealing with other display sizes/resolutions
+    if capabilities.currentExtent.width != max(u32) {
+        return capabilities.currentExtent
+    } else {
+        width, height: i32
+        SDL.Vulkan_GetDrawableSize(ctx.window, &width, &height)
+        actual_extent := vk.Extent2D {
+            width  = u32(width),
+            height = u32(height),
+        }
+        actual_extent.width = clamp(
+            actual_extent.width,
+            capabilities.minImageExtent.width,
+            capabilities.maxImageExtent.width,
+        )
+        actual_extent.height = clamp(
+            actual_extent.height,
+            capabilities.minImageExtent.height,
+            capabilities.maxImageExtent.height,
+        )
+        return actual_extent
+    }
+}
+
+create_swap_chain :: proc(ctx: ^AppContext) {
+
+}
+
 // ========================================= WINDOW =========================================
 init_window :: proc(global_context: ^AppContext) {
     SDL.Init({.VIDEO})
