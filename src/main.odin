@@ -17,6 +17,8 @@ AppContext :: struct {
     graphics_queue: vk.Queue,
     logical_device: vk.Device,
     phys_device:    vk.PhysicalDevice,
+    present_queue:  vk.Queue,
+    surface:        vk.SurfaceKHR,
     window:         ^SDL.Window,
 }
 
@@ -27,6 +29,7 @@ QueueFamilyIndicies :: struct {
     // Similar to Option(T) or Result(T) in other languages
     // use '.?' to get the value of a Maybe in a "v, ok" format
     graphics_family: Maybe(u32),
+    present_family:  Maybe(u32),
 }
 
 
@@ -101,8 +104,8 @@ init_vulkan :: proc(ctx: ^AppContext) {
         setup_debug_messenger(ctx)
     }
 
+    create_surface(ctx)
     pick_physical_device(ctx)
-
     create_logical_device(ctx)
 
     free_all(context.temp_allocator)
@@ -113,8 +116,8 @@ create_instance :: proc(ctx: ^AppContext) {
         sType            = vk.StructureType.APPLICATION_INFO,
         pApplicationName = "Odin VkGuide",
         pEngineName      = "No Engine",
-        engineVersion    = vk.MAKE_VERSION(1, 3, 0),
-        apiVersion       = vk.API_VERSION_1_3,
+        engineVersion    = vk.MAKE_VERSION(1, 1, 0),
+        apiVersion       = vk.API_VERSION_1_1,
     }
 
     extensions := get_required_extensions(ctx)
@@ -295,7 +298,7 @@ pick_physical_device :: proc(ctx: ^AppContext) {
 
     // no need for addressable semantics here because d is an opaque handle (not dereferencable)
     for d in devices {
-        if is_device_suitable(d) {
+        if is_device_suitable(d, ctx) {
             ctx.phys_device = d
             break
         }
@@ -303,7 +306,7 @@ pick_physical_device :: proc(ctx: ^AppContext) {
 
 }
 
-is_device_suitable :: proc(device: vk.PhysicalDevice) -> b32 {
+is_device_suitable :: proc(device: vk.PhysicalDevice, ctx: ^AppContext) -> b32 {
     // manually querying for device compatibility
     //
     // device_propeties: vk.PhysicalDeviceProperties
@@ -312,46 +315,69 @@ is_device_suitable :: proc(device: vk.PhysicalDevice) -> b32 {
     // vk.GetPhysicalDeviceFeatures(device, &device_features)
     //
     // return device_propeties.deviceType == .DISCRETE_GPU && device_features.geometryShader
-    indicies := find_queue_families(device)
+    indicies := find_queue_families(device, ctx)
     _, has_graphics := indicies.graphics_family.?
 
     return b32(has_graphics)
 }
 
-find_queue_families :: proc(device: vk.PhysicalDevice) -> QueueFamilyIndicies {
+find_queue_families :: proc(
+    device: vk.PhysicalDevice,
+    ctx: ^AppContext,
+) -> QueueFamilyIndicies {
     indicies: QueueFamilyIndicies
+    present_support: b32
 
     count: u32
     vk.GetPhysicalDeviceQueueFamilyProperties(device, &count, nil)
     queue_families := make([]vk.QueueFamilyProperties, count, context.temp_allocator)
     vk.GetPhysicalDeviceQueueFamilyProperties(device, &count, raw_data(queue_families))
 
+
     for fam, i in queue_families {
         if .GRAPHICS in fam.queueFlags {
             indicies.graphics_family = u32(i)
+            vk.GetPhysicalDeviceSurfaceSupportKHR(
+                device,
+                u32(i),
+                ctx.surface,
+                &present_support,
+            )
+            if present_support do indicies.present_family = u32(i)
         }
     }
     return indicies
 }
 
 create_logical_device :: proc(ctx: ^AppContext) {
-    indices := find_queue_families(ctx.phys_device)
-    v, _ := indices.graphics_family.?
+    indices := find_queue_families(ctx.phys_device, ctx)
+
+    unique_indicies: map[u32]struct {}
+    unique_indicies[indices.graphics_family.?] = {}
+    unique_indicies[indices.present_family.?] = {}
+
+    queue_create_infos := make([dynamic]vk.DeviceQueueCreateInfo, 0, len(unique_indicies))
     queue_priority := f32(1.0)
 
-    queue_CI := vk.DeviceQueueCreateInfo {
-        sType            = .DEVICE_QUEUE_CREATE_INFO,
-        queueFamilyIndex = v,
-        queueCount       = 1,
-        pQueuePriorities = &queue_priority,
+    for fam in unique_indicies {
+        append(
+            &queue_create_infos,
+            vk.DeviceQueueCreateInfo {
+                sType = .DEVICE_QUEUE_CREATE_INFO,
+                queueFamilyIndex = fam,
+                queueCount = 1,
+                pQueuePriorities = &queue_priority,
+            },
+        )
     }
+
     // empty for now
     device_features: vk.PhysicalDeviceFeatures
 
     device_CI := vk.DeviceCreateInfo {
         sType                 = .DEVICE_CREATE_INFO,
-        pQueueCreateInfos     = &queue_CI,
-        queueCreateInfoCount  = 1,
+        pQueueCreateInfos     = raw_data(queue_create_infos),
+        queueCreateInfoCount  = u32(len(queue_create_infos)),
         pEnabledFeatures      = &device_features,
         enabledExtensionCount = 0,
     }
@@ -360,7 +386,7 @@ create_logical_device :: proc(ctx: ^AppContext) {
         // these are actually ignored because there is no longer a distinction
         // between device and instance level validation layers
         // however they are set just to be compatible with older Vulkan implementations
-        device_CI.enabledLayerCount = len(VALIDATION_LAYERS)
+        device_CI.enabledLayerCount = u32(len(VALIDATION_LAYERS))
         device_CI.ppEnabledLayerNames = raw_data(VALIDATION_LAYERS)
     } else {
         device_CI.enabledLayerCount = 0
@@ -370,7 +396,14 @@ create_logical_device :: proc(ctx: ^AppContext) {
     log.assertf(result == .SUCCESS, "Failed to create logical device with result: %v", result)
 
     // using 0 here because only a single queue was created
-    vk.GetDeviceQueue(ctx.logical_device, v, 0, &ctx.graphics_queue)
+    vk.GetDeviceQueue(ctx.logical_device, indices.graphics_family.?, 0, &ctx.graphics_queue)
+    vk.GetDeviceQueue(ctx.logical_device, indices.present_family.?, 0, &ctx.present_queue)
+}
+
+// ========================================= VULKAN SURFACE =========================================
+create_surface :: proc(ctx: ^AppContext) {
+    result := SDL.Vulkan_CreateSurface(ctx.window, ctx.instance, &ctx.surface)
+    log.assertf(result == true, "Failed to create window surface")
 }
 
 // ========================================= WINDOW =========================================
@@ -406,6 +439,7 @@ cleanup :: proc(global_context: ^AppContext) {
 
     vk.DestroyDevice(global_context.logical_device, nil)
     assert(vk.DestroyInstance != nil, "nil")
+    vk.DestroySurfaceKHR(global_context.instance, global_context.surface, nil)
     vk.DestroyInstance(global_context.instance, nil)
 
     SDL.Vulkan_UnloadLibrary()
