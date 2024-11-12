@@ -10,6 +10,7 @@ WINDOW_WIDTH :: 1920
 WINDOW_HEIGHT :: 1080
 
 GLOBAL_RUNTIME_CONTEXT: runtime.Context
+VK_NULL_HANDLE :: 0
 
 AppContext :: struct {
     dbg_messenger:  vk.DebugUtilsMessengerEXT,
@@ -19,6 +20,7 @@ AppContext :: struct {
     phys_device:    vk.PhysicalDevice,
     present_queue:  vk.Queue,
     surface:        vk.SurfaceKHR,
+    swapchain:      vk.SwapchainKHR,
     window:         ^SDL.Window,
 }
 
@@ -75,7 +77,7 @@ main :: proc() {
     logger = log.create_console_logger()
     context.logger = logger
     GLOBAL_RUNTIME_CONTEXT = context
-    when ENABLE_VALIDATION_LAYERS do log.info("-- DEBUG MODE --")
+    when ENABLE_VALIDATION_LAYERS do log.debug("-- DEBUG MODE --")
 
     init_window(&ctx)
 
@@ -117,6 +119,7 @@ init_vulkan :: proc(ctx: ^AppContext) {
     create_surface(ctx)
     pick_physical_device(ctx)
     create_logical_device(ctx)
+    vk.load_proc_addresses_device(ctx.logical_device)
     create_swap_chain(ctx)
 
     free_all(context.temp_allocator)
@@ -144,7 +147,7 @@ create_instance :: proc(ctx: ^AppContext) {
     when ENABLE_VALIDATION_LAYERS {
         messenger_CI: vk.DebugUtilsMessengerCreateInfoEXT
         populate_dbg_messenger_CI(&messenger_CI)
-        log.info("Validation layers enabled")
+        log.debug("Validation layers enabled")
         instance_CI.ppEnabledLayerNames = raw_data(VALIDATION_LAYERS)
         instance_CI.enabledLayerCount = u32(len(VALIDATION_LAYERS))
         instance_CI.pNext = &messenger_CI
@@ -177,7 +180,7 @@ create_instance :: proc(ctx: ^AppContext) {
     // need "addressable semantics" in this loop in order to cast values from the iterable value
     // pass the iterable value by pointer in order to accomplish that
     // (and use the cstring cast since the strings from Vulkan are cstrings, i.e. null terminated)
-    for &ext in instance_extensions do log.infof("Extension: %s", cstring(&ext.extensionName[0]))
+    // for &ext in instance_extensions do log.infof("Extension: %s", cstring(&ext.extensionName[0]))
 }
 
 check_validation_layer_support :: proc() -> bool {
@@ -191,9 +194,9 @@ check_validation_layer_support :: proc() -> bool {
         layer_found: bool
         for &layer in layers {
             prop := cstring(&layer.layerName[0])
-            log.infof("Instance Layer Property: %s", prop)
+            // log.infof("Instance Layer Property: %s", prop)
             if name == prop {
-                log.infof("Validation layer %q found", name)
+                log.debugf("Validation layer %q found", name)
                 layer_found = true
                 break
             }
@@ -222,12 +225,11 @@ get_required_extensions :: proc(ctx: ^AppContext) -> [dynamic]cstring {
         }
 
     }
-
     return extensions
 }
 
 
-vk_messenger_callback :: proc "system" (
+vk_messenger_callback: vk.ProcDebugUtilsMessengerCallbackEXT : proc "system" (
     messageSeverity: vk.DebugUtilsMessageSeverityFlagsEXT,
     messageTypes: vk.DebugUtilsMessageTypeFlagsEXT,
     pCallbackData: ^vk.DebugUtilsMessengerCallbackDataEXT,
@@ -235,7 +237,8 @@ vk_messenger_callback :: proc "system" (
 ) -> b32 {
 
     if pCallbackData.pMessage == nil do return false
-    context = (cast(^runtime.Context)pUserData)^
+    // context = (cast(^runtime.Context)pUserData)^
+    context = GLOBAL_RUNTIME_CONTEXT
     if .INFO | .VERBOSE in messageSeverity {
         log.info(pCallbackData.pMessage)
     } else if .WARNING in messageSeverity {
@@ -265,13 +268,13 @@ populate_dbg_messenger_CI :: proc(create_info: ^vk.DebugUtilsMessengerCreateInfo
 // odinfmt: disable
 setup_debug_messenger :: proc(ctx: ^AppContext) {
     // debug messenger is an extension function so it needs to be loaded separately
-    vk.CreateDebugUtilsMessengerEXT =
-        auto_cast vk.GetInstanceProcAddr(ctx.instance, "vkCreateDebugUtilsMessengerEXT")
+    // vk.CreateDebugUtilsMessengerEXT =
+    //     auto_cast vk.GetInstanceProcAddr(ctx.instance, "vkCreateDebugUtilsMessengerEXT")
     assert(vk.CreateDebugUtilsMessengerEXT != nil, "Create debug messenger proc address is nil")
-
-    vk.DestroyDebugUtilsMessengerEXT = 
-        auto_cast vk.GetInstanceProcAddr(ctx.instance, "vkDestroyDebugUtilsMessengerEXT")
-    assert(vk.DestroyDebugUtilsMessengerEXT != nil, "Destroy debug messenger proc address is nil")
+    //
+    // vk.DestroyDebugUtilsMessengerEXT = 
+    //     auto_cast vk.GetInstanceProcAddr(ctx.instance, "vkDestroyDebugUtilsMessengerEXT")
+    // assert(vk.DestroyDebugUtilsMessengerEXT != nil, "Destroy debug messenger proc address is nil")
 
     // severity based on logger level
     // can be used to change the messages for the messenger callback
@@ -295,6 +298,12 @@ setup_debug_messenger :: proc(ctx: ^AppContext) {
 
     result := vk.CreateDebugUtilsMessengerEXT(ctx.instance, &dbg_messenger_CI, nil, &ctx.dbg_messenger)
     log.assertf(result == .SUCCESS, "Debug messenger creation failed with result: %v", result)
+      //send test debug message
+      // msg_callback_data : vk.DebugUtilsMessengerCallbackDataEXT = {
+      //   .DEBUG_UTILS_MESSENGER_CALLBACK_DATA_EXT,
+      //   nil, {}, nil, 0, "test message", 0, nil, 0, nil, 0, nil,
+      // }
+      // vk.SubmitDebugUtilsMessageEXT(ctx.instance, {.WARNING}, {.GENERAL}, &msg_callback_data)
 } // odinfmt: enable
 
 
@@ -380,13 +389,14 @@ find_queue_families :: proc(
 }
 
 create_logical_device :: proc(ctx: ^AppContext) {
+    empty :: struct {}
     indices := find_queue_families(ctx.phys_device, ctx)
 
-    unique_indicies: map[u32]struct {}
+    unique_indicies := make(map[u32]empty, context.temp_allocator)
     unique_indicies[indices.graphics_family.?] = {}
     unique_indicies[indices.present_family.?] = {}
 
-    queue_create_infos := make([dynamic]vk.DeviceQueueCreateInfo, 0, len(unique_indicies))
+    queue_create_infos := make([dynamic]vk.DeviceQueueCreateInfo, context.temp_allocator)
     queue_priority := f32(1.0)
 
     for fam in unique_indicies {
@@ -444,11 +454,10 @@ check_device_extension_support :: proc(device: vk.PhysicalDevice) -> bool {
     available_extensions := make([]vk.ExtensionProperties, count, context.temp_allocator)
     vk.EnumerateDeviceExtensionProperties(device, nil, &count, raw_data(available_extensions))
 
-    required_extensions := make(map[cstring][^]u8)
+    required_extensions := make(map[cstring][^]u8, context.temp_allocator)
     for ext in DEVICE_EXTENSIONS {
         required_extensions[ext] = cast([^]u8)ext
     }
-    log.infof("Required extensions: %#v", required_extensions)
 
     for &ext in available_extensions {
         d := raw_data(&ext.extensionName)
@@ -469,7 +478,7 @@ query_swapchain_support :: proc(
     format_count: u32
     vk.GetPhysicalDeviceSurfaceFormatsKHR(device, ctx.surface, &format_count, nil)
     if format_count != 0 {
-        details.formats = make([]vk.SurfaceFormatKHR, format_count)
+        details.formats = make([]vk.SurfaceFormatKHR, format_count, context.temp_allocator)
         vk.GetPhysicalDeviceSurfaceFormatsKHR(
             device,
             ctx.surface,
@@ -481,7 +490,11 @@ query_swapchain_support :: proc(
     present_count: u32
     vk.GetPhysicalDeviceSurfacePresentModesKHR(device, ctx.surface, &present_count, nil)
     if present_count != 0 {
-        details.present_modes = make([]vk.PresentModeKHR, present_count)
+        details.present_modes = make(
+            []vk.PresentModeKHR,
+            present_count,
+            context.temp_allocator,
+        )
         vk.GetPhysicalDeviceSurfacePresentModesKHR(
             device,
             ctx.surface,
@@ -525,6 +538,7 @@ choose_swap_extent :: proc(
 
     // there's some pixels->coordinates conversion and clamping happening here that should probably be understood
     // will probably be necessary for when dealing with other display sizes/resolutions
+
     if capabilities.currentExtent.width != max(u32) {
         return capabilities.currentExtent
     } else {
@@ -549,7 +563,47 @@ choose_swap_extent :: proc(
 }
 
 create_swap_chain :: proc(ctx: ^AppContext) {
+    swap_chain_support := query_swapchain_support(ctx.phys_device, ctx)
+    surface_format := choose_swap_surface_format(swap_chain_support.formats)
+    present_mode := choose_swap_present_mode(swap_chain_support.present_modes)
+    extent := choose_swap_extent(swap_chain_support.capabilities, ctx)
+    indicies := find_queue_families(ctx.phys_device, ctx)
+    queue_family_indicies := []u32{indicies.graphics_family.?, indicies.present_family.?}
 
+    image_count := swap_chain_support.capabilities.minImageCount + 1
+    if swap_chain_support.capabilities.maxImageCount > 0 &&
+       image_count > swap_chain_support.capabilities.maxImageCount {
+        image_count = swap_chain_support.capabilities.maxImageCount
+    }
+
+    swap_chain_CI := vk.SwapchainCreateInfoKHR {
+        sType            = .SWAPCHAIN_CREATE_INFO_KHR,
+        surface          = ctx.surface,
+        minImageCount    = image_count,
+        imageFormat      = surface_format.format,
+        imageColorSpace  = surface_format.colorSpace,
+        imageExtent      = extent,
+        imageArrayLayers = 1,
+        imageUsage       = {.COLOR_ATTACHMENT}, // post-processing operations would require a different usage bit. Should probably look into that
+    }
+
+    if indicies.graphics_family != indicies.present_family {
+        swap_chain_CI.imageSharingMode = .CONCURRENT
+        swap_chain_CI.queueFamilyIndexCount = 2
+        swap_chain_CI.pQueueFamilyIndices = raw_data(queue_family_indicies)
+    } else {
+        swap_chain_CI.imageSharingMode = .EXCLUSIVE
+        swap_chain_CI.queueFamilyIndexCount = 0
+        swap_chain_CI.pQueueFamilyIndices = nil
+    }
+    swap_chain_CI.preTransform = swap_chain_support.capabilities.currentTransform
+    swap_chain_CI.compositeAlpha = {.OPAQUE}
+    swap_chain_CI.presentMode = present_mode
+    swap_chain_CI.clipped = true
+    swap_chain_CI.oldSwapchain = VK_NULL_HANDLE
+
+    result := vk.CreateSwapchainKHR(ctx.logical_device, &swap_chain_CI, nil, &ctx.swapchain)
+    log.assertf(result == .SUCCESS, "Failed to create swapchain with result: %v", result)
 }
 
 // ========================================= WINDOW =========================================
@@ -583,6 +637,7 @@ cleanup :: proc(global_context: ^AppContext) {
         )
     }
 
+    vk.DestroySwapchainKHR(global_context.logical_device, global_context.swapchain, nil)
     vk.DestroyDevice(global_context.logical_device, nil)
     assert(vk.DestroyInstance != nil, "nil")
     vk.DestroySurfaceKHR(global_context.instance, global_context.surface, nil)
