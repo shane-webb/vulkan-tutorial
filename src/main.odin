@@ -52,7 +52,6 @@ main :: proc() {
     track: mem.Tracking_Allocator
     mem.tracking_allocator_init(&track, context.allocator)
     context.allocator = mem.tracking_allocator(&track)
-    GLOBAL_RUNTIME_CONTEXT = context
 
     defer {
         if len(track.allocation_map) > 0 {
@@ -75,6 +74,8 @@ main :: proc() {
     ctx: AppContext
     logger = log.create_console_logger()
     context.logger = logger
+    GLOBAL_RUNTIME_CONTEXT = context
+    when ENABLE_VALIDATION_LAYERS do log.info("-- DEBUG MODE --")
 
     init_window(&ctx)
 
