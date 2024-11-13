@@ -24,6 +24,7 @@ AppContext :: struct {
     swapchain_extent:       vk.Extent2D,
     swapchain_images:       []vk.Image,
     swapchain_image_format: vk.Format,
+    swapchain_image_views:  []vk.ImageView,
     window:                 ^SDL.Window,
 }
 
@@ -124,6 +125,7 @@ init_vulkan :: proc(ctx: ^AppContext) {
     create_logical_device(ctx)
     vk.load_proc_addresses_device(ctx.logical_device)
     create_swap_chain(ctx)
+    create_image_views(ctx)
 
     free_all(context.temp_allocator)
 }
@@ -610,7 +612,7 @@ create_swap_chain :: proc(ctx: ^AppContext) {
 
     swp_image_count: u32
     vk.GetSwapchainImagesKHR(ctx.logical_device, ctx.swapchain, &swp_image_count, nil)
-    ctx.swapchain_images = make([]vk.Image, image_count, context.temp_allocator)
+    ctx.swapchain_images = make([]vk.Image, image_count)
     vk.GetSwapchainImagesKHR(
         ctx.logical_device,
         ctx.swapchain,
@@ -620,6 +622,36 @@ create_swap_chain :: proc(ctx: ^AppContext) {
 
     ctx.swapchain_extent = extent
     ctx.swapchain_image_format = surface_format.format
+}
+
+// ========================================= VULKAN IMAGES =========================================
+// stuff about mipmapping here, would probably be good to know more about the image views
+create_image_views :: proc(ctx: ^AppContext) {
+    ctx.swapchain_image_views = make([]vk.ImageView, len(ctx.swapchain_images))
+
+    for img, i in ctx.swapchain_images {
+        create_info := vk.ImageViewCreateInfo {
+            sType = .IMAGE_VIEW_CREATE_INFO,
+            image = img,
+            viewType = .D2,
+            format = ctx.swapchain_image_format,
+            components = {r = .IDENTITY, g = .IDENTITY, b = .IDENTITY, a = .IDENTITY},
+            subresourceRange = {
+                aspectMask = {.COLOR},
+                baseMipLevel = 0,
+                levelCount = 1,
+                baseArrayLayer = 0,
+                layerCount = 1,
+            },
+        }
+        result := vk.CreateImageView(
+            ctx.logical_device,
+            &create_info,
+            nil,
+            &ctx.swapchain_image_views[i],
+        )
+        log.assertf(result == .SUCCESS, "Failed to create image views with result: %v", result)
+    }
 }
 
 // ========================================= WINDOW =========================================
@@ -653,6 +685,10 @@ cleanup :: proc(global_context: ^AppContext) {
         )
     }
 
+    for img in global_context.swapchain_image_views {
+        vk.DestroyImageView(global_context.logical_device, img, nil)
+    }
+
     vk.DestroySwapchainKHR(global_context.logical_device, global_context.swapchain, nil)
     vk.DestroyDevice(global_context.logical_device, nil)
     assert(vk.DestroyInstance != nil, "nil")
@@ -662,4 +698,7 @@ cleanup :: proc(global_context: ^AppContext) {
     SDL.Vulkan_UnloadLibrary()
     SDL.DestroyWindow(global_context.window)
     SDL.Quit()
+
+    delete(global_context.swapchain_image_views)
+    delete(global_context.swapchain_images)
 }
