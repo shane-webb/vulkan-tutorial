@@ -13,15 +13,18 @@ GLOBAL_RUNTIME_CONTEXT: runtime.Context
 VK_NULL_HANDLE :: 0
 
 AppContext :: struct {
-    dbg_messenger:  vk.DebugUtilsMessengerEXT,
-    instance:       vk.Instance,
-    graphics_queue: vk.Queue,
-    logical_device: vk.Device,
-    phys_device:    vk.PhysicalDevice,
-    present_queue:  vk.Queue,
-    surface:        vk.SurfaceKHR,
-    swapchain:      vk.SwapchainKHR,
-    window:         ^SDL.Window,
+    dbg_messenger:          vk.DebugUtilsMessengerEXT,
+    instance:               vk.Instance,
+    graphics_queue:         vk.Queue,
+    logical_device:         vk.Device,
+    phys_device:            vk.PhysicalDevice,
+    present_queue:          vk.Queue,
+    surface:                vk.SurfaceKHR,
+    swapchain:              vk.SwapchainKHR,
+    swapchain_extent:       vk.Extent2D,
+    swapchain_images:       []vk.Image,
+    swapchain_image_format: vk.Format,
+    window:                 ^SDL.Window,
 }
 
 // bundled to simplify querying for the different families at different times
@@ -604,6 +607,19 @@ create_swap_chain :: proc(ctx: ^AppContext) {
 
     result := vk.CreateSwapchainKHR(ctx.logical_device, &swap_chain_CI, nil, &ctx.swapchain)
     log.assertf(result == .SUCCESS, "Failed to create swapchain with result: %v", result)
+
+    swp_image_count: u32
+    vk.GetSwapchainImagesKHR(ctx.logical_device, ctx.swapchain, &swp_image_count, nil)
+    ctx.swapchain_images = make([]vk.Image, image_count, context.temp_allocator)
+    vk.GetSwapchainImagesKHR(
+        ctx.logical_device,
+        ctx.swapchain,
+        &swp_image_count,
+        raw_data(ctx.swapchain_images),
+    )
+
+    ctx.swapchain_extent = extent
+    ctx.swapchain_image_format = surface_format.format
 }
 
 // ========================================= WINDOW =========================================
