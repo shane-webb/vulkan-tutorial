@@ -1,0 +1,65 @@
+THE STEPS:
+
+    vertex/index buffer
+    -------------------
+            |
+            V
+    input assembler		fixed function
+            |
+            V
+    vertext shader		programmable
+            |
+            V
+    tessellation		programmable
+            |
+            V
+    geometry shader		programmable
+            |
+            V
+    rasterization		fixed function
+            |
+            V
+    fragment shader		programmable
+            |
+            V
+    color blending		fixed function
+            |
+            V
+    -------------------
+    framebuffer
+
+=======================================================================================================
+
+    - input assembler:		collects raw vertex data from the buffers
+    - vertext shader:		run for every vertex and applies transformations to them
+    - tessellations:		can subdivide geometry based on rules to increase mesh quality
+    - geometry shader:		run on every primitive, can discard or output more primitives (not commonly used)
+    - rasterization stage:	turns primitves into fragments (the pixel elements they fill on the framebuffer)
+    - fragment shader:		run on every fragment, determines which framebuffer the fragment is written to
+    - color blending:		mixes fragments that map to the same pixel (so the colors make a gradient)
+
+    - fixed function:		the way these steps work is predefined, though their operations can be tweaked via parameters
+    - programmable:		can run custom code on the GPU to apply exactly the operations desired ("shaders", aka shader programs)
+
+    - the vulkan graphics pipeline is basically completely immutable. It must be recreated from scratch if changes like different shaders,
+      bind different framebuffers, or change the blending functions are desired.
+
+    - Will have to create a number of pipelines that represent all the different combinations of states wanted in the rendering operations
+
+    - some of the programmable stages are optional based on the intended goal
+
+
+=======================================================================================================
+
+    VERTEX SHADER
+
+    - inputs:
+	- world position
+	- color
+	- normal coords
+	- texture coords
+    - output:
+	- final position in "clip coordinates"
+	- attributes to pass to fragment shader (color and texture coords)
+
+    "We can directly output normalized device coordinates by outputting them as clip coordinates from the vertex shader with the last component set to 1. That way the division to transform clip coordinates to normalized device coordinates will not change anything."

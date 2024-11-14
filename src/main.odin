@@ -3,6 +3,7 @@ package main
 import "base:runtime"
 import "core:log"
 import "core:mem"
+import "core:os"
 import SDL "vendor:sdl2"
 import vk "vendor:vulkan"
 
@@ -126,6 +127,7 @@ init_vulkan :: proc(ctx: ^AppContext) {
     vk.load_proc_addresses_device(ctx.logical_device)
     create_swap_chain(ctx)
     create_image_views(ctx)
+    create_graphics_pipeline(ctx)
 
     free_all(context.temp_allocator)
 }
@@ -654,6 +656,61 @@ create_image_views :: proc(ctx: ^AppContext) {
     }
 }
 
+// ========================================= VULKAN PIPELINE =========================================
+create_graphics_pipeline :: proc(ctx: ^AppContext) {
+    vert_handle, vert_open_ok := os.open(".\\bin\\vert.spv")
+    defer os.close(vert_handle)
+    frag_handle, frag_open_ok := os.open(".\\bin\\frag.spv")
+    if vert_open_ok != nil || frag_open_ok != nil {
+        log.panicf("Failed to open shader file - frag:%v\tvert:%v", frag_open_ok, vert_open_ok)
+    }
+
+    vert_file, vert_read_ok := os.read_entire_file_from_handle(vert_handle)
+    frag_file, frag_read_ok := os.read_entire_file_from_handle(frag_handle)
+    if vert_read_ok != true || frag_read_ok != true {
+        log.panic("Failed to read shader file")
+    }
+
+    vert_shader_module := create_shader_module(ctx, vert_file)
+    frag_shader_module := create_shader_module(ctx, frag_file)
+
+    vert_shader_stage_info := vk.PipelineShaderStageCreateInfo {
+        sType  = .PIPELINE_SHADER_STAGE_CREATE_INFO,
+        stage  = {.VERTEX},
+        module = vert_shader_module,
+        pName  = "main",
+    }
+    frag_shader_stage_info := vk.PipelineShaderStageCreateInfo {
+        sType  = .PIPELINE_SHADER_STAGE_CREATE_INFO,
+        stage  = {.FRAGMENT},
+        module = frag_shader_module,
+        pName  = "main",
+    }
+
+    shader_stages: []vk.PipelineShaderStageCreateInfo = {
+        vert_shader_stage_info,
+        frag_shader_stage_info,
+    }
+
+    vk.DestroyShaderModule(ctx.logical_device, frag_shader_module, nil)
+    vk.DestroyShaderModule(ctx.logical_device, vert_shader_module, nil)
+}
+
+create_shader_module :: proc(ctx: ^AppContext, code: []u8) -> vk.ShaderModule {
+    code := code
+    create_info := vk.ShaderModuleCreateInfo {
+        sType    = .SHADER_MODULE_CREATE_INFO,
+        codeSize = len(code),
+        pCode    = cast(^u32)raw_data(code),
+    }
+
+    shader_module: vk.ShaderModule
+    result := vk.CreateShaderModule(ctx.logical_device, &create_info, nil, &shader_module)
+
+    log.assertf(result == .SUCCESS, "Failed to create shader module with result:%v", result)
+
+    return shader_module
+}
 // ========================================= WINDOW =========================================
 init_window :: proc(global_context: ^AppContext) {
     SDL.Init({.VIDEO})
