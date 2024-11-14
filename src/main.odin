@@ -19,6 +19,7 @@ AppContext :: struct {
     graphics_queue:         vk.Queue,
     logical_device:         vk.Device,
     phys_device:            vk.PhysicalDevice,
+    pipeline_layout:        vk.PipelineLayout,
     present_queue:          vk.Queue,
     surface:                vk.SurfaceKHR,
     swapchain:              vk.SwapchainKHR,
@@ -661,12 +662,15 @@ create_graphics_pipeline :: proc(ctx: ^AppContext) {
     vert_handle, vert_open_ok := os.open(".\\bin\\vert.spv")
     defer os.close(vert_handle)
     frag_handle, frag_open_ok := os.open(".\\bin\\frag.spv")
+    defer os.close(frag_handle)
     if vert_open_ok != nil || frag_open_ok != nil {
         log.panicf("Failed to open shader file - frag:%v\tvert:%v", frag_open_ok, vert_open_ok)
     }
 
     vert_file, vert_read_ok := os.read_entire_file_from_handle(vert_handle)
+    defer delete(vert_file)
     frag_file, frag_read_ok := os.read_entire_file_from_handle(frag_handle)
+    defer delete(frag_file)
     if vert_read_ok != true || frag_read_ok != true {
         log.panic("Failed to read shader file")
     }
@@ -691,6 +695,129 @@ create_graphics_pipeline :: proc(ctx: ^AppContext) {
         vert_shader_stage_info,
         frag_shader_stage_info,
     }
+
+    // Fixed functions setup
+    // ----------------------------------------------------------------------------
+
+    // vertext input
+    vertex_input_info := vk.PipelineVertexInputStateCreateInfo {
+        sType                           = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        vertexBindingDescriptionCount   = 0,
+        pVertexBindingDescriptions      = nil,
+        vertexAttributeDescriptionCount = 0,
+        pVertexAttributeDescriptions    = nil,
+    }
+
+    // input_assembly
+    input_assembly := vk.PipelineInputAssemblyStateCreateInfo {
+        sType                  = .PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        topology               = .TRIANGLE_LIST,
+        primitiveRestartEnable = b32(false),
+    }
+
+    // viewport and scissors
+    viewport := vk.Viewport {
+        x        = f32(0.0),
+        y        = f32(0.0),
+        width    = f32(ctx.swapchain_extent.width),
+        height   = f32(ctx.swapchain_extent.height),
+        minDepth = f32(0.0),
+        maxDepth = f32(1.0),
+    }
+
+    scissor := vk.Rect2D {
+        offset = {0, 0},
+        extent = ctx.swapchain_extent,
+    }
+
+    // dynamic state
+    dynamic_states := []vk.DynamicState{vk.DynamicState.VIEWPORT, vk.DynamicState.SCISSOR}
+    dyanmic_state := vk.PipelineDynamicStateCreateInfo {
+        sType             = .PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        dynamicStateCount = u32(len(dynamic_states)),
+        pDynamicStates    = raw_data(dynamic_states),
+    }
+
+    // viewport state
+    viewport_state := vk.PipelineViewportStateCreateInfo {
+        sType         = .PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        viewportCount = 1,
+        scissorCount  = 1,
+        pViewports    = &viewport,
+        pScissors     = &scissor,
+    }
+
+    // rasterizer
+    rasterizer := vk.PipelineRasterizationStateCreateInfo {
+        sType                   = .PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        depthClampEnable        = b32(false),
+        rasterizerDiscardEnable = b32(false),
+        polygonMode             = .FILL,
+        lineWidth               = f32(1.0),
+        cullMode                = {.BACK},
+        frontFace               = .CLOCKWISE,
+        depthBiasEnable         = b32(false),
+        depthBiasConstantFactor = f32(0.0),
+        depthBiasClamp          = f32(0.0),
+        depthBiasSlopeFactor    = f32(0.0),
+    }
+
+    // multisampling (for anti-aliasing, requires enabling a GPU feature)
+    multisampling := vk.PipelineMultisampleStateCreateInfo {
+        sType                 = .PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        sampleShadingEnable   = b32(false),
+        rasterizationSamples  = {._1},
+        minSampleShading      = f32(1.0),
+        pSampleMask           = nil,
+        alphaToCoverageEnable = b32(false),
+        alphaToOneEnable      = b32(false),
+    }
+
+    // depth and stencil testing
+    // TBD
+
+    // color blending - setup differs if there is more than one framebuffer
+    color_blend_attachment := vk.PipelineColorBlendAttachmentState {
+        colorWriteMask      = {.R, .G, .B, .A},
+        blendEnable         = b32(false),
+        srcColorBlendFactor = .ONE,
+        dstColorBlendFactor = .ZERO,
+        colorBlendOp        = .ADD,
+        srcAlphaBlendFactor = .ONE,
+        dstAlphaBlendFactor = .ZERO,
+        alphaBlendOp        = .ADD,
+    }
+
+    color_blending := vk.PipelineColorBlendStateCreateInfo {
+        sType           = .PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        logicOpEnable   = b32(false),
+        logicOp         = .COPY,
+        attachmentCount = 1,
+        pAttachments    = &color_blend_attachment,
+        blendConstants  = {f32(0.0), f32(0.0), f32(0.0), f32(0.0)},
+    }
+
+    // pipeline layout
+    pipeline_layout_info := vk.PipelineLayoutCreateInfo {
+        sType                  = .PIPELINE_LAYOUT_CREATE_INFO,
+        setLayoutCount         = 0,
+        pSetLayouts            = nil,
+        pushConstantRangeCount = 0,
+        pPushConstantRanges    = nil,
+    }
+
+    result_pipeline := vk.CreatePipelineLayout(
+        ctx.logical_device,
+        &pipeline_layout_info,
+        nil,
+        &ctx.pipeline_layout,
+    )
+    log.assertf(
+        result_pipeline == .SUCCESS,
+        "Failed to create pipeline layout with result: %v",
+        result_pipeline,
+    )
+
 
     vk.DestroyShaderModule(ctx.logical_device, frag_shader_module, nil)
     vk.DestroyShaderModule(ctx.logical_device, vert_shader_module, nil)
@@ -742,6 +869,11 @@ cleanup :: proc(global_context: ^AppContext) {
         )
     }
 
+    vk.DestroyPipelineLayout(
+        global_context.logical_device,
+        global_context.pipeline_layout,
+        nil,
+    )
     for img in global_context.swapchain_image_views {
         vk.DestroyImageView(global_context.logical_device, img, nil)
     }
