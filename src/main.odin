@@ -698,7 +698,7 @@ create_render_pass :: proc(ctx: ^AppContext) {
         srcSubpass    = vk.SUBPASS_EXTERNAL,
         dstSubpass    = u32(0),
         srcStageMask  = {.COLOR_ATTACHMENT_OUTPUT},
-        srcAccessMask = {.INDIRECT_COMMAND_READ},
+        // srcAccessMask = {.INDIRECT_COMMAND_READ},
         dstStageMask  = {.COLOR_ATTACHMENT_OUTPUT},
         dstAccessMask = {.COLOR_ATTACHMENT_WRITE},
     }
@@ -1151,11 +1151,13 @@ draw_frame :: proc(ctx: ^AppContext) {
     )
 
     present_info := vk.PresentInfoKHR {
-        sType          = .PRESENT_INFO_KHR,
-        swapchainCount = 1,
-        pSwapchains    = &ctx.swapchain,
-        pImageIndices  = &image_index,
-        pResults       = nil,
+        sType              = .PRESENT_INFO_KHR,
+        swapchainCount     = 1,
+        pSwapchains        = &ctx.swapchain,
+        pImageIndices      = &image_index,
+        pResults           = nil,
+        waitSemaphoreCount = 1,
+        pWaitSemaphores    = &ctx.render_finished_semaphore,
     }
 
     result_present := vk.QueuePresentKHR(ctx.present_queue, &present_info)

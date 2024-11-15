@@ -18,8 +18,8 @@ if defined odin_args (
   )
 ) else (
   echo compiling shaders
-  .\bin\glslc.exe shader.vert -o ..\shaders\vert.spv
-  .\bin\glslc.exe shader.frag -o ..\shaders\frag.spv
+    .\bin\glslc.exe shaders\shader.vert -o bin\vert.spv
+    .\bin\glslc.exe shaders\shader.frag -o bin\frag.spv
   echo running app
   odin run src -out=bin/app.exe
 )
