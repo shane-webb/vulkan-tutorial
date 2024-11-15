@@ -14,6 +14,8 @@ GLOBAL_RUNTIME_CONTEXT: runtime.Context
 VK_NULL_HANDLE :: 0
 
 AppContext :: struct {
+    command_buffer:         vk.CommandBuffer,
+    command_pool:           vk.CommandPool,
     dbg_messenger:          vk.DebugUtilsMessengerEXT,
     instance:               vk.Instance,
     graphics_queue:         vk.Queue,
@@ -134,6 +136,8 @@ init_vulkan :: proc(ctx: ^AppContext) {
     create_render_pass(ctx)
     create_graphics_pipeline(ctx)
     create_framebuffers(ctx)
+    create_command_pool(ctx)
+    create_command_buffer(ctx)
 
     free_all(context.temp_allocator)
 }
@@ -193,7 +197,7 @@ create_instance :: proc(ctx: ^AppContext) {
     // need "addressable semantics" in this loop in order to cast values from the iterable value
     // pass the iterable value by pointer in order to accomplish that
     // (and use the cstring cast since the strings from Vulkan are cstrings, i.e. null terminated)
-    for &ext in instance_extensions do log.infof("Extension: %s", cstring(&ext.extensionName[0]))
+    // for &ext in instance_extensions do log.infof("Extension: %s", cstring(&ext.extensionName[0]))
 }
 
 check_validation_layer_support :: proc() -> bool {
@@ -675,7 +679,7 @@ create_render_pass :: proc(ctx: ^AppContext) {
 
     color_attachment_ref := vk.AttachmentReference {
         attachment = 0,
-        layout     = .ATTACHMENT_OPTIMAL,
+        layout     = .COLOR_ATTACHMENT_OPTIMAL,
     }
 
     subpass := vk.SubpassDescription {
@@ -948,6 +952,99 @@ create_framebuffers :: proc(ctx: ^AppContext) {
         )
     }
 }
+// ========================================= VULKAN COMMANDS =========================================
+create_command_pool :: proc(ctx: ^AppContext) {
+    queue_family_indicies := find_queue_families(ctx.phys_device, ctx)
+
+    pool_info := vk.CommandPoolCreateInfo {
+        sType            = .COMMAND_POOL_CREATE_INFO,
+        flags            = {.RESET_COMMAND_BUFFER},
+        queueFamilyIndex = queue_family_indicies.graphics_family.?,
+    }
+
+    result := vk.CreateCommandPool(ctx.logical_device, &pool_info, nil, &ctx.command_pool)
+    log.assertf(result == .SUCCESS, "Failed to create command pool with result: %v", result)
+}
+
+create_command_buffer :: proc(ctx: ^AppContext) {
+    alloc_info := vk.CommandBufferAllocateInfo {
+        sType              = .COMMAND_BUFFER_ALLOCATE_INFO,
+        commandPool        = ctx.command_pool,
+        level              = .PRIMARY,
+        commandBufferCount = 1,
+    }
+
+    result := vk.AllocateCommandBuffers(ctx.logical_device, &alloc_info, &ctx.command_buffer)
+    log.assertf(
+        result == .SUCCESS,
+        "Failed to allocate command buffers with result: %v",
+        result,
+    )
+}
+
+record_command_buffer :: proc(
+    buffer: vk.CommandBuffer,
+    image_index: u32,
+    render_pass: vk.RenderPass,
+    swap_chain_framebuffers: []vk.Framebuffer,
+    swap_chain_extent: vk.Extent2D,
+    graphics_pipeline: vk.Pipeline,
+) {
+    begin_info := vk.CommandBufferBeginInfo {
+        sType            = .COMMAND_BUFFER_BEGIN_INFO,
+        // flags            = {.ONE_TIME_SUBMIT},
+        pInheritanceInfo = nil,
+    }
+
+    result_command_begin := vk.BeginCommandBuffer(buffer, &begin_info)
+    log.assertf(
+        result_command_begin == .SUCCESS,
+        "Failed to begin recording command buffer with result: %v",
+        result_command_begin,
+    )
+
+    clear_color := vk.ClearValue {
+        color = {float32 = {0.2, 0.0, 0.2, 1.0}},
+    }
+    render_pass_info := vk.RenderPassBeginInfo {
+        sType = .RENDER_PASS_BEGIN_INFO,
+        renderPass = render_pass,
+        framebuffer = swap_chain_framebuffers[image_index],
+        renderArea = {offset = {0, 0}, extent = swap_chain_extent},
+        clearValueCount = 1,
+        pClearValues = &clear_color,
+    }
+
+    vk.CmdBeginRenderPass(buffer, &render_pass_info, .INLINE)
+    vk.CmdBindPipeline(buffer, .GRAPHICS, graphics_pipeline)
+
+    viewport := vk.Viewport {
+        x        = f32(0.0),
+        y        = f32(0.0),
+        width    = f32(swap_chain_extent.width),
+        height   = f32(swap_chain_extent.height),
+        minDepth = f32(0.0),
+        maxDepth = f32(1.0),
+    }
+    vk.CmdSetViewport(buffer, u32(0), u32(1), &viewport)
+
+    scissor := vk.Rect2D {
+        offset = {0, 0},
+        extent = swap_chain_extent,
+    }
+    vk.CmdSetScissor(buffer, u32(0), u32(1), &scissor)
+
+    vk.CmdDraw(buffer, u32(3), u32(1), u32(0), u32(0))
+
+    vk.CmdEndRenderPass(buffer)
+
+    result_command_end := vk.EndCommandBuffer(buffer)
+    log.assertf(
+        result_command_end == .SUCCESS,
+        "Failed to end recording commands with result: %v",
+        result_command_end,
+    )
+}
 // ========================================= WINDOW =========================================
 init_window :: proc(global_context: ^AppContext) {
     SDL.Init({.VIDEO})
@@ -978,6 +1075,8 @@ cleanup :: proc(global_context: ^AppContext) {
             nil,
         )
     }
+
+    vk.DestroyCommandPool(global_context.logical_device, global_context.command_pool, nil)
 
     for buf in global_context.swapchain_framebuffers {
         vk.DestroyFramebuffer(global_context.logical_device, buf, nil)
