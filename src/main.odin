@@ -26,6 +26,7 @@ AppContext :: struct {
     surface:                vk.SurfaceKHR,
     swapchain:              vk.SwapchainKHR,
     swapchain_extent:       vk.Extent2D,
+    swapchain_framebuffers: []vk.Framebuffer,
     swapchain_images:       []vk.Image,
     swapchain_image_format: vk.Format,
     swapchain_image_views:  []vk.ImageView,
@@ -132,6 +133,7 @@ init_vulkan :: proc(ctx: ^AppContext) {
     create_image_views(ctx)
     create_render_pass(ctx)
     create_graphics_pipeline(ctx)
+    create_framebuffers(ctx)
 
     free_all(context.temp_allocator)
 }
@@ -915,6 +917,37 @@ create_shader_module :: proc(ctx: ^AppContext, code: []u8) -> vk.ShaderModule {
 
     return shader_module
 }
+// ========================================= VULKAN FRAMEBUFFERS =========================================
+create_framebuffers :: proc(ctx: ^AppContext) {
+    ctx.swapchain_framebuffers = make([]vk.Framebuffer, len(ctx.swapchain_image_views))
+
+    for img, i in ctx.swapchain_image_views {
+        attachments := []vk.ImageView{img}
+
+        frame_buffer_info := vk.FramebufferCreateInfo {
+            sType           = .FRAMEBUFFER_CREATE_INFO,
+            renderPass      = ctx.render_pass,
+            attachmentCount = 1,
+            pAttachments    = raw_data(attachments),
+            width           = ctx.swapchain_extent.width,
+            height          = ctx.swapchain_extent.height,
+            layers          = 1,
+        }
+
+        result := vk.CreateFramebuffer(
+            ctx.logical_device,
+            &frame_buffer_info,
+            nil,
+            &ctx.swapchain_framebuffers[i],
+        )
+        log.assertf(
+            result == .SUCCESS,
+            "Failed to create framebuffer for index %v with result: %v",
+            i,
+            result,
+        )
+    }
+}
 // ========================================= WINDOW =========================================
 init_window :: proc(global_context: ^AppContext) {
     SDL.Init({.VIDEO})
@@ -946,6 +979,10 @@ cleanup :: proc(global_context: ^AppContext) {
         )
     }
 
+    for buf in global_context.swapchain_framebuffers {
+        vk.DestroyFramebuffer(global_context.logical_device, buf, nil)
+    }
+
     vk.DestroyPipeline(global_context.logical_device, global_context.pipeline, nil)
     vk.DestroyPipelineLayout(
         global_context.logical_device,
@@ -967,6 +1004,7 @@ cleanup :: proc(global_context: ^AppContext) {
     SDL.DestroyWindow(global_context.window)
     SDL.Quit()
 
+    delete(global_context.swapchain_framebuffers)
     delete(global_context.swapchain_image_views)
     delete(global_context.swapchain_images)
 }
