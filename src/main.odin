@@ -19,8 +19,10 @@ AppContext :: struct {
     graphics_queue:         vk.Queue,
     logical_device:         vk.Device,
     phys_device:            vk.PhysicalDevice,
+    pipeline:               vk.Pipeline,
     pipeline_layout:        vk.PipelineLayout,
     present_queue:          vk.Queue,
+    render_pass:            vk.RenderPass,
     surface:                vk.SurfaceKHR,
     swapchain:              vk.SwapchainKHR,
     swapchain_extent:       vk.Extent2D,
@@ -128,6 +130,7 @@ init_vulkan :: proc(ctx: ^AppContext) {
     vk.load_proc_addresses_device(ctx.logical_device)
     create_swap_chain(ctx)
     create_image_views(ctx)
+    create_render_pass(ctx)
     create_graphics_pipeline(ctx)
 
     free_all(context.temp_allocator)
@@ -188,7 +191,7 @@ create_instance :: proc(ctx: ^AppContext) {
     // need "addressable semantics" in this loop in order to cast values from the iterable value
     // pass the iterable value by pointer in order to accomplish that
     // (and use the cstring cast since the strings from Vulkan are cstrings, i.e. null terminated)
-    // for &ext in instance_extensions do log.infof("Extension: %s", cstring(&ext.extensionName[0]))
+    for &ext in instance_extensions do log.infof("Extension: %s", cstring(&ext.extensionName[0]))
 }
 
 check_validation_layer_support :: proc() -> bool {
@@ -658,7 +661,48 @@ create_image_views :: proc(ctx: ^AppContext) {
 }
 
 // ========================================= VULKAN PIPELINE =========================================
+create_render_pass :: proc(ctx: ^AppContext) {
+    color_attachment := vk.AttachmentDescription {
+        format        = ctx.swapchain_image_format,
+        samples       = {._1},
+        loadOp        = .CLEAR,
+        storeOp       = .STORE,
+        initialLayout = .UNDEFINED,
+        finalLayout   = .PRESENT_SRC_KHR,
+    }
+
+    color_attachment_ref := vk.AttachmentReference {
+        attachment = 0,
+        layout     = .ATTACHMENT_OPTIMAL,
+    }
+
+    subpass := vk.SubpassDescription {
+        pipelineBindPoint    = .GRAPHICS,
+        colorAttachmentCount = 1,
+        pColorAttachments    = &color_attachment_ref,
+    }
+
+    create_info := vk.RenderPassCreateInfo {
+        sType           = .RENDER_PASS_CREATE_INFO,
+        attachmentCount = 1,
+        pAttachments    = &color_attachment,
+        subpassCount    = 1,
+        pSubpasses      = &subpass,
+    }
+    result := vk.CreateRenderPass(ctx.logical_device, &create_info, nil, &ctx.render_pass)
+    log.assertf(result == .SUCCESS, "Failed to create render pass with result: %v", result)
+}
+
 create_graphics_pipeline :: proc(ctx: ^AppContext) {
+    /*
+        Shader stages:      the shader modules that define the functionality of the programmable stages of the graphics pipeline
+        Fixed-function      state: all of the structures that define the fixed-function stages of the pipeline, like input assembly, rasterizer, viewport and color blending
+        Pipeline layout:    the uniform and push values referenced by the shader that can be updated at draw time
+        Render pass:        the attachments referenced by the pipeline stages and their usage
+    */
+
+    // Shader modules setup
+    // ----------------------------------------------------------------------------
     vert_handle, vert_open_ok := os.open(".\\bin\\vert.spv")
     defer os.close(vert_handle)
     frag_handle, frag_open_ok := os.open(".\\bin\\frag.spv")
@@ -806,18 +850,51 @@ create_graphics_pipeline :: proc(ctx: ^AppContext) {
         pPushConstantRanges    = nil,
     }
 
-    result_pipeline := vk.CreatePipelineLayout(
+    result_pipeline_layout := vk.CreatePipelineLayout(
         ctx.logical_device,
         &pipeline_layout_info,
         nil,
         &ctx.pipeline_layout,
     )
     log.assertf(
-        result_pipeline == .SUCCESS,
+        result_pipeline_layout == .SUCCESS,
         "Failed to create pipeline layout with result: %v",
-        result_pipeline,
+        result_pipeline_layout,
     )
 
+    pipeline_info := vk.GraphicsPipelineCreateInfo {
+        sType               = .GRAPHICS_PIPELINE_CREATE_INFO,
+        stageCount          = 2,
+        pStages             = raw_data(shader_stages),
+        pVertexInputState   = &vertex_input_info,
+        pInputAssemblyState = &input_assembly,
+        pViewportState      = &viewport_state,
+        pRasterizationState = &rasterizer,
+        pMultisampleState   = &multisampling,
+        pDepthStencilState  = nil,
+        pColorBlendState    = &color_blending,
+        pDynamicState       = &dyanmic_state,
+        layout              = ctx.pipeline_layout,
+        renderPass          = ctx.render_pass,
+        subpass             = 0,
+        basePipelineIndex   = -1,
+        basePipelineHandle  = VK_NULL_HANDLE,
+    }
+
+
+    result_pipeline := vk.CreateGraphicsPipelines(
+        ctx.logical_device,
+        VK_NULL_HANDLE,
+        1,
+        &pipeline_info,
+        nil,
+        &ctx.pipeline,
+    )
+    log.assertf(
+        result_pipeline == .SUCCESS,
+        "Failed to create pipeline with result: %v",
+        result_pipeline,
+    )
 
     vk.DestroyShaderModule(ctx.logical_device, frag_shader_module, nil)
     vk.DestroyShaderModule(ctx.logical_device, vert_shader_module, nil)
@@ -869,11 +946,13 @@ cleanup :: proc(global_context: ^AppContext) {
         )
     }
 
+    vk.DestroyPipeline(global_context.logical_device, global_context.pipeline, nil)
     vk.DestroyPipelineLayout(
         global_context.logical_device,
         global_context.pipeline_layout,
         nil,
     )
+    vk.DestroyRenderPass(global_context.logical_device, global_context.render_pass, nil)
     for img in global_context.swapchain_image_views {
         vk.DestroyImageView(global_context.logical_device, img, nil)
     }
