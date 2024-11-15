@@ -14,25 +14,28 @@ GLOBAL_RUNTIME_CONTEXT: runtime.Context
 VK_NULL_HANDLE :: 0
 
 AppContext :: struct {
-    command_buffer:         vk.CommandBuffer,
-    command_pool:           vk.CommandPool,
-    dbg_messenger:          vk.DebugUtilsMessengerEXT,
-    instance:               vk.Instance,
-    graphics_queue:         vk.Queue,
-    logical_device:         vk.Device,
-    phys_device:            vk.PhysicalDevice,
-    pipeline:               vk.Pipeline,
-    pipeline_layout:        vk.PipelineLayout,
-    present_queue:          vk.Queue,
-    render_pass:            vk.RenderPass,
-    surface:                vk.SurfaceKHR,
-    swapchain:              vk.SwapchainKHR,
-    swapchain_extent:       vk.Extent2D,
-    swapchain_framebuffers: []vk.Framebuffer,
-    swapchain_images:       []vk.Image,
-    swapchain_image_format: vk.Format,
-    swapchain_image_views:  []vk.ImageView,
-    window:                 ^SDL.Window,
+    command_buffer:            vk.CommandBuffer,
+    command_pool:              vk.CommandPool,
+    dbg_messenger:             vk.DebugUtilsMessengerEXT,
+    instance:                  vk.Instance,
+    image_available_semaphore: vk.Semaphore,
+    in_flight_fence:           vk.Fence,
+    graphics_queue:            vk.Queue,
+    logical_device:            vk.Device,
+    phys_device:               vk.PhysicalDevice,
+    pipeline:                  vk.Pipeline,
+    pipeline_layout:           vk.PipelineLayout,
+    present_queue:             vk.Queue,
+    render_finished_semaphore: vk.Semaphore,
+    render_pass:               vk.RenderPass,
+    surface:                   vk.SurfaceKHR,
+    swapchain:                 vk.SwapchainKHR,
+    swapchain_extent:          vk.Extent2D,
+    swapchain_framebuffers:    []vk.Framebuffer,
+    swapchain_images:          []vk.Image,
+    swapchain_image_format:    vk.Format,
+    swapchain_image_views:     []vk.ImageView,
+    window:                    ^SDL.Window,
 }
 
 // bundled to simplify querying for the different families at different times
@@ -107,7 +110,9 @@ main :: proc() {
                 break loop
             }
         }
+        draw_frame(&ctx)
     }
+    vk.DeviceWaitIdle(ctx.logical_device)
 
     cleanup(&ctx)
 
@@ -138,6 +143,7 @@ init_vulkan :: proc(ctx: ^AppContext) {
     create_framebuffers(ctx)
     create_command_pool(ctx)
     create_command_buffer(ctx)
+    create_sync_objects(ctx)
 
     free_all(context.temp_allocator)
 }
@@ -688,12 +694,23 @@ create_render_pass :: proc(ctx: ^AppContext) {
         pColorAttachments    = &color_attachment_ref,
     }
 
+    dependency := vk.SubpassDependency {
+        srcSubpass    = vk.SUBPASS_EXTERNAL,
+        dstSubpass    = u32(0),
+        srcStageMask  = {.COLOR_ATTACHMENT_OUTPUT},
+        srcAccessMask = {.INDIRECT_COMMAND_READ},
+        dstStageMask  = {.COLOR_ATTACHMENT_OUTPUT},
+        dstAccessMask = {.COLOR_ATTACHMENT_WRITE},
+    }
+
     create_info := vk.RenderPassCreateInfo {
         sType           = .RENDER_PASS_CREATE_INFO,
         attachmentCount = 1,
         pAttachments    = &color_attachment,
         subpassCount    = 1,
         pSubpasses      = &subpass,
+        dependencyCount = 1,
+        pDependencies   = &dependency,
     }
     result := vk.CreateRenderPass(ctx.logical_device, &create_info, nil, &ctx.render_pass)
     log.assertf(result == .SUCCESS, "Failed to create render pass with result: %v", result)
@@ -1004,7 +1021,7 @@ record_command_buffer :: proc(
     )
 
     clear_color := vk.ClearValue {
-        color = {float32 = {0.2, 0.0, 0.2, 1.0}},
+        color = {float32 = {0.02, 0.1, 0.25, 1.0}},
     }
     render_pass_info := vk.RenderPassBeginInfo {
         sType = .RENDER_PASS_BEGIN_INFO,
@@ -1045,6 +1062,110 @@ record_command_buffer :: proc(
         result_command_end,
     )
 }
+// ========================================= VULKAN DRAWING =========================================
+/*
+At a high level, rendering a frame in Vulkan consists of a common set of steps:
+
+    - Wait for the previous frame to finish
+    - Acquire an image from the swap chain
+    - Record a command buffer which draws the scene onto that image
+    - Submit the recorded command buffer
+    - Present the swap chain image
+*/
+
+create_sync_objects :: proc(ctx: ^AppContext) {
+    semaphore_info := vk.SemaphoreCreateInfo {
+        sType = .SEMAPHORE_CREATE_INFO,
+    }
+    fence_info := vk.FenceCreateInfo {
+        sType = .FENCE_CREATE_INFO,
+        flags = {.SIGNALED},
+    }
+
+    result_img_semaphore := vk.CreateSemaphore(
+        ctx.logical_device,
+        &semaphore_info,
+        nil,
+        &ctx.image_available_semaphore,
+    )
+    result_render_semaphore := vk.CreateSemaphore(
+        ctx.logical_device,
+        &semaphore_info,
+        nil,
+        &ctx.render_finished_semaphore,
+    )
+    result_fence := vk.CreateFence(ctx.logical_device, &fence_info, nil, &ctx.in_flight_fence)
+
+    log.assertf(
+        result_render_semaphore == .SUCCESS &&
+        result_img_semaphore == .SUCCESS &&
+        result_fence == .SUCCESS,
+        "Failed to create a sync obj with result: %v, %v %v",
+        result_render_semaphore,
+        result_img_semaphore,
+        result_fence,
+    )
+}
+
+draw_frame :: proc(ctx: ^AppContext) {
+    vk.WaitForFences(ctx.logical_device, u32(1), &ctx.in_flight_fence, b32(true), max(u64))
+    vk.ResetFences(ctx.logical_device, u32(1), &ctx.in_flight_fence)
+
+    image_index: u32
+    vk.AcquireNextImageKHR(
+        ctx.logical_device,
+        ctx.swapchain,
+        max(u64),
+        ctx.image_available_semaphore,
+        VK_NULL_HANDLE,
+        &image_index,
+    )
+    vk.ResetCommandBuffer(ctx.command_buffer, {.RELEASE_RESOURCES})
+
+    record_command_buffer(
+        ctx.command_buffer,
+        image_index,
+        ctx.render_pass,
+        ctx.swapchain_framebuffers,
+        ctx.swapchain_extent,
+        ctx.pipeline,
+    )
+
+    wait_stages := [?]vk.PipelineStageFlags{{.COLOR_ATTACHMENT_OUTPUT}}
+    submit_info := vk.SubmitInfo {
+        sType                = .SUBMIT_INFO,
+        waitSemaphoreCount   = 1,
+        pWaitSemaphores      = &ctx.image_available_semaphore,
+        pWaitDstStageMask    = &wait_stages[0],
+        commandBufferCount   = 1,
+        pCommandBuffers      = &ctx.command_buffer,
+        signalSemaphoreCount = 1,
+        pSignalSemaphores    = &ctx.render_finished_semaphore,
+    }
+
+    result_submit := vk.QueueSubmit(ctx.graphics_queue, 1, &submit_info, ctx.in_flight_fence)
+    log.assertf(
+        result_submit == .SUCCESS,
+        "Failed to submit draw command buffer with result: %v",
+        result_submit,
+    )
+
+    present_info := vk.PresentInfoKHR {
+        sType          = .PRESENT_INFO_KHR,
+        swapchainCount = 1,
+        pSwapchains    = &ctx.swapchain,
+        pImageIndices  = &image_index,
+        pResults       = nil,
+    }
+
+    result_present := vk.QueuePresentKHR(ctx.present_queue, &present_info)
+    // log.assertf(
+    //     result_present == .SUCCESS,
+    //     "Failed to present image with result: %v",
+    //     result_present,
+    // )
+
+}
 // ========================================= WINDOW =========================================
 init_window :: proc(global_context: ^AppContext) {
     SDL.Init({.VIDEO})
@@ -1075,6 +1196,18 @@ cleanup :: proc(global_context: ^AppContext) {
             nil,
         )
     }
+
+    vk.DestroySemaphore(
+        global_context.logical_device,
+        global_context.render_finished_semaphore,
+        nil,
+    )
+    vk.DestroySemaphore(
+        global_context.logical_device,
+        global_context.image_available_semaphore,
+        nil,
+    )
+    vk.DestroyFence(global_context.logical_device, global_context.in_flight_fence, nil)
 
     vk.DestroyCommandPool(global_context.logical_device, global_context.command_pool, nil)
 

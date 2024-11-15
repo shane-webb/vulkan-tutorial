@@ -1,0 +1,54 @@
+High level steps of drawing:
+
+        - wait for previous frame to finish
+        - acquire an image from the swap chain
+        - record a command buffer which draws the scene onto that image
+        - submit the recoreded command buffer
+        - present the swap chain image
+
+==========================================================================
+                SYNCHRONIZATION
+
+        - Vulkan commands are executed asynchronously
+                - means functions will return before the cmd is finished executing
+                - also means the order of execution is undefined (problem when steps depend on previous steps)
+
+
+                PRIMITIVES
+           -------------------
+
+        - Semaphores
+                - adds a border between queue operations
+                - two kinds:    binary          timeline
+                - Exist in one of two states:           signaled        unsignaled
+                - commands can be executed in order via semephores
+
+                Ex: S -> semaphore, A -> cmd, B -> cmd
+
+        S: unsignaled                      |                          | S: signaled  |                                  | S: unsignaled
+        A: executing                       | A finishes and signals S | A: finished  | A waiting for S to be unsignaled | A: executing
+        B: waiting (while S is unsignaled) |                          | B: executing | B finishes and signals S         | B: waiting
+
+                Psuedo-code:
+
+                A, B := vk.CommandBuffer()
+                S := vk.Semaphore()
+
+                vk.QueueSubmit(work: A, signal: S, wait: None) // enqueue A, starts executing immediately, will signal S when finished
+                vk.QueueSubmit(work: B, signal: none, wait: S) // enqueue B, waits on S to start executing
+
+
+        - Fences
+                - synchronizes CPU (host) executions
+                - if the host needs to know if the GPU has finished something, a fence is used
+                - exist in one of two states:           signaled        unsignaled
+
+                Psuedo-code:
+
+                A := vk.CommandBuffer()
+                F := vk.Fence()
+
+                vk.QueueSubmit(work: A, fence: F) // starts work on A immidiately and will signal F when finished
+                vk.WaitforFence(F) // blocks the CPU until A has finished
+
+                // do other work that depended on the GPU being finished
