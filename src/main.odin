@@ -19,6 +19,7 @@ AppContext :: struct {
     command_pool:               vk.CommandPool,
     current_frame:              u32,
     dbg_messenger:              vk.DebugUtilsMessengerEXT,
+    frame_buffere_resized:      bool,
     instance:                   vk.Instance,
     image_available_semaphores: []vk.Semaphore,
     in_flight_fences:           []vk.Fence,
@@ -644,6 +645,31 @@ create_swap_chain :: proc(ctx: ^AppContext) {
     ctx.swapchain_image_format = surface_format.format
 }
 
+recreate_swap_chain :: proc(ctx: ^AppContext) {
+    vk.DeviceWaitIdle(ctx.logical_device)
+
+    cleanup_swap_chain(ctx)
+
+    create_swap_chain(ctx)
+    create_image_views(ctx)
+    create_framebuffers(ctx)
+}
+
+cleanup_swap_chain :: proc(ctx: ^AppContext) {
+
+    for buf in ctx.swapchain_framebuffers {
+        vk.DestroyFramebuffer(ctx.logical_device, buf, nil)
+    }
+
+    for img in ctx.swapchain_image_views {
+        vk.DestroyImageView(ctx.logical_device, img, nil)
+    }
+    vk.DestroySwapchainKHR(ctx.logical_device, ctx.swapchain, nil)
+
+    delete(ctx.swapchain_image_views)
+    delete(ctx.swapchain_framebuffers)
+}
+
 // ========================================= VULKAN IMAGES =========================================
 // stuff about mipmapping here, would probably be good to know more about the image views
 create_image_views :: proc(ctx: ^AppContext) {
@@ -1093,7 +1119,7 @@ create_sync_objects :: proc(ctx: ^AppContext) {
         flags = {.SIGNALED},
     }
 
-    for i in 0 ..= MAX_FRAMES_IN_FLIGHT {
+    for i in 0 ..< MAX_FRAMES_IN_FLIGHT {
         result_img_semaphore := vk.CreateSemaphore(
             ctx.logical_device,
             &semaphore_info,
@@ -1135,10 +1161,9 @@ draw_frame :: proc(ctx: ^AppContext) {
         b32(true),
         max(u64),
     )
-    vk.ResetFences(ctx.logical_device, u32(1), &ctx.in_flight_fences[ctx.current_frame])
 
     image_index: u32
-    vk.AcquireNextImageKHR(
+    result_acquire := vk.AcquireNextImageKHR(
         ctx.logical_device,
         ctx.swapchain,
         max(u64),
@@ -1146,6 +1171,18 @@ draw_frame :: proc(ctx: ^AppContext) {
         VK_NULL_HANDLE,
         &image_index,
     )
+    if result_acquire == .ERROR_OUT_OF_DATE_KHR {
+        ctx.frame_buffere_resized = false
+        recreate_swap_chain(ctx)
+        return
+    }
+    log.assertf(
+        result_acquire == .SUCCESS || result_acquire == .SUBOPTIMAL_KHR,
+        "Failed to acquire swapchain image with result: %v",
+        result_acquire,
+    )
+
+    vk.ResetFences(ctx.logical_device, u32(1), &ctx.in_flight_fences[ctx.current_frame])
     vk.ResetCommandBuffer(ctx.command_buffers[ctx.current_frame], {.RELEASE_RESOURCES})
 
     record_command_buffer(
@@ -1191,7 +1228,7 @@ draw_frame :: proc(ctx: ^AppContext) {
         pWaitSemaphores    = &ctx.render_finished_semaphores[ctx.current_frame],
     }
 
-    result_present := vk.QueuePresentKHR(ctx.present_queue, &present_info)
+    vk.QueuePresentKHR(ctx.present_queue, &present_info)
     // log.assertf(
     //     result_present == .SUCCESS,
     //     "Failed to present image with result: %v",
@@ -1199,10 +1236,9 @@ draw_frame :: proc(ctx: ^AppContext) {
     // )
 
     ctx.current_frame = (ctx.current_frame + 1) % MAX_FRAMES_IN_FLIGHT
-
 }
 // ========================================= WINDOW =========================================
-init_window :: proc(global_context: ^AppContext) {
+init_window :: proc(ctx: ^AppContext) {
     SDL.Init({.VIDEO})
     window := SDL.CreateWindow(
         "Odin Vulkan Again",
@@ -1216,64 +1252,44 @@ init_window :: proc(global_context: ^AppContext) {
         log.error("Failed to create window")
         return
     }
-    global_context.window = window
+    ctx.window = window
 
-
-    // TODO: look into resizing the window
+    // TODO: is this all there is to resizing?
+    SDL.SetWindowResizable(ctx.window, true)
 }
 
 // ========================================= DESTRUCTION =========================================
-cleanup :: proc(global_context: ^AppContext) {
+cleanup :: proc(ctx: ^AppContext) {
+    cleanup_swap_chain(ctx)
+
+    vk.DestroyPipeline(ctx.logical_device, ctx.pipeline, nil)
+    vk.DestroyPipelineLayout(ctx.logical_device, ctx.pipeline_layout, nil)
+    vk.DestroyRenderPass(ctx.logical_device, ctx.render_pass, nil)
+
+    for i in 0 ..< MAX_FRAMES_IN_FLIGHT {
+        vk.DestroySemaphore(ctx.logical_device, ctx.render_finished_semaphores[i], nil)
+        vk.DestroySemaphore(ctx.logical_device, ctx.image_available_semaphores[i], nil)
+        vk.DestroyFence(ctx.logical_device, ctx.in_flight_fences[i], nil)
+    }
+    vk.DestroyCommandPool(ctx.logical_device, ctx.command_pool, nil)
+
+    vk.DestroyDevice(ctx.logical_device, nil)
+
     when ENABLE_VALIDATION_LAYERS {
-        vk.DestroyDebugUtilsMessengerEXT(
-            global_context.instance,
-            global_context.dbg_messenger,
-            nil,
-        )
+        vk.DestroyDebugUtilsMessengerEXT(ctx.instance, ctx.dbg_messenger, nil)
     }
 
-    for i in 0 ..= MAX_FRAMES_IN_FLIGHT {
-        vk.DestroySemaphore(
-            global_context.logical_device,
-            global_context.render_finished_semaphores[i],
-            nil,
-        )
-        vk.DestroySemaphore(
-            global_context.logical_device,
-            global_context.image_available_semaphores[i],
-            nil,
-        )
-        vk.DestroyFence(global_context.logical_device, global_context.in_flight_fences[i], nil)
-    }
-
-    vk.DestroyCommandPool(global_context.logical_device, global_context.command_pool, nil)
-
-    for buf in global_context.swapchain_framebuffers {
-        vk.DestroyFramebuffer(global_context.logical_device, buf, nil)
-    }
-
-    vk.DestroyPipeline(global_context.logical_device, global_context.pipeline, nil)
-    vk.DestroyPipelineLayout(
-        global_context.logical_device,
-        global_context.pipeline_layout,
-        nil,
-    )
-    vk.DestroyRenderPass(global_context.logical_device, global_context.render_pass, nil)
-    for img in global_context.swapchain_image_views {
-        vk.DestroyImageView(global_context.logical_device, img, nil)
-    }
-
-    vk.DestroySwapchainKHR(global_context.logical_device, global_context.swapchain, nil)
-    vk.DestroyDevice(global_context.logical_device, nil)
-    assert(vk.DestroyInstance != nil, "nil")
-    vk.DestroySurfaceKHR(global_context.instance, global_context.surface, nil)
-    vk.DestroyInstance(global_context.instance, nil)
+    vk.DestroySurfaceKHR(ctx.instance, ctx.surface, nil)
+    vk.DestroyInstance(ctx.instance, nil)
 
     SDL.Vulkan_UnloadLibrary()
-    SDL.DestroyWindow(global_context.window)
-    SDL.Quit()
+    SDL.DestroyWindow(ctx.window)
 
-    delete(global_context.swapchain_framebuffers)
-    delete(global_context.swapchain_image_views)
-    delete(global_context.swapchain_images)
+    delete(ctx.command_buffers)
+    delete(ctx.render_finished_semaphores)
+    delete(ctx.image_available_semaphores)
+    delete(ctx.in_flight_fences)
+    delete(ctx.swapchain_images)
+
+    SDL.Quit()
 }
