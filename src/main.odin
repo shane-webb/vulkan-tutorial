@@ -10,8 +10,8 @@ import "core:reflect"
 import SDL "vendor:sdl2"
 import vk "vendor:vulkan"
 
-WINDOW_WIDTH :: 1920
-WINDOW_HEIGHT :: 1080
+WINDOW_WIDTH :: 800
+WINDOW_HEIGHT :: 600
 MAX_FRAMES_IN_FLIGHT :: 2
 
 GLOBAL_RUNTIME_CONTEXT: runtime.Context
@@ -989,7 +989,8 @@ create_command_buffers :: proc(ctx: ^AppContext) {
 }
 
 record_command_buffer :: proc(
-    buffer: vk.CommandBuffer,
+    cmd_buffer: vk.CommandBuffer,
+    vertex_buffer: vk.Buffer,
     image_index: u32,
     render_pass: vk.RenderPass,
     swap_chain_framebuffers: []vk.Framebuffer,
@@ -1002,7 +1003,7 @@ record_command_buffer :: proc(
         pInheritanceInfo = nil,
     }
 
-    result_command_begin := vk.BeginCommandBuffer(buffer, &begin_info)
+    result_command_begin := vk.BeginCommandBuffer(cmd_buffer, &begin_info)
     log.assertf(
         result_command_begin == .SUCCESS,
         "Failed to begin recording command buffer with result: %v",
@@ -1021,30 +1022,36 @@ record_command_buffer :: proc(
         pClearValues = &clear_color,
     }
 
-    vk.CmdBeginRenderPass(buffer, &render_pass_info, .INLINE)
-    vk.CmdBindPipeline(buffer, .GRAPHICS, graphics_pipeline)
+    vk.CmdBeginRenderPass(cmd_buffer, &render_pass_info, .INLINE)
+    {
+        vk.CmdBindPipeline(cmd_buffer, .GRAPHICS, graphics_pipeline)
 
-    viewport := vk.Viewport {
-        x        = f32(0.0),
-        y        = f32(0.0),
-        width    = f32(swap_chain_extent.width),
-        height   = f32(swap_chain_extent.height),
-        minDepth = f32(0.0),
-        maxDepth = f32(1.0),
+        viewport := vk.Viewport {
+            x        = f32(0.0),
+            y        = f32(0.0),
+            width    = f32(swap_chain_extent.width),
+            height   = f32(swap_chain_extent.height),
+            minDepth = f32(0.0),
+            maxDepth = f32(1.0),
+        }
+        vk.CmdSetViewport(cmd_buffer, u32(0), u32(1), &viewport)
+
+        scissor := vk.Rect2D {
+            offset = {0, 0},
+            extent = swap_chain_extent,
+        }
+        vk.CmdSetScissor(cmd_buffer, u32(0), u32(1), &scissor)
+
+        vertex_buffers := []vk.Buffer{vertex_buffer}
+        offsets := []vk.DeviceSize{0}
+        vk.CmdBindVertexBuffers(cmd_buffer, 0, 1, raw_data(vertex_buffers), raw_data(offsets))
+
+
+        vk.CmdDraw(cmd_buffer, u32(len(vertices)), u32(1), u32(0), u32(0))
     }
-    vk.CmdSetViewport(buffer, u32(0), u32(1), &viewport)
+    vk.CmdEndRenderPass(cmd_buffer)
 
-    scissor := vk.Rect2D {
-        offset = {0, 0},
-        extent = swap_chain_extent,
-    }
-    vk.CmdSetScissor(buffer, u32(0), u32(1), &scissor)
-
-    vk.CmdDraw(buffer, u32(3), u32(1), u32(0), u32(0))
-
-    vk.CmdEndRenderPass(buffer)
-
-    result_command_end := vk.EndCommandBuffer(buffer)
+    result_command_end := vk.EndCommandBuffer(cmd_buffer)
     log.assertf(result_command_end == .SUCCESS, "Failed to end recording commands with result: %v", result_command_end)
 }
 // ========================================= VULKAN DRAWING =========================================
@@ -1126,6 +1133,7 @@ draw_frame :: proc(ctx: ^AppContext) {
 
     record_command_buffer(
         ctx.command_buffers[ctx.current_frame],
+        ctx.vertex_buffer,
         image_index,
         ctx.render_pass,
         ctx.swapchain_framebuffers,
@@ -1198,6 +1206,12 @@ create_vertex_buffer :: proc(ctx: ^AppContext) {
         "Failed to allocate vertext buffer memory with result: %v",
         result_buffer_alloc,
     )
+    vk.BindBufferMemory(ctx.logical_device, ctx.vertex_buffer, ctx.vertex_buffer_mem, 0)
+
+    data: rawptr
+    vk.MapMemory(ctx.logical_device, ctx.vertex_buffer_mem, 0, buffer_info.size, {}, &data)
+    mem.copy(data, raw_data(vertices), int(buffer_info.size))
+    vk.UnmapMemory(ctx.logical_device, ctx.vertex_buffer_mem)
 }
 
 find_memory_type :: proc(ctx: ^AppContext, type_filter: u32, props: vk.MemoryPropertyFlags) -> u32 {
@@ -1236,7 +1250,9 @@ init_window :: proc(ctx: ^AppContext) {
 cleanup :: proc(ctx: ^AppContext) {
     cleanup_swap_chain(ctx)
 
-    vk.DestroyBuffer(ctx.logical_device, ctx.vertext_buffer, nil)
+    vk.DestroyBuffer(ctx.logical_device, ctx.vertex_buffer, nil)
+    vk.FreeMemory(ctx.logical_device, ctx.vertex_buffer_mem, nil)
+
     vk.DestroyPipeline(ctx.logical_device, ctx.pipeline, nil)
     vk.DestroyPipelineLayout(ctx.logical_device, ctx.pipeline_layout, nil)
     vk.DestroyRenderPass(ctx.logical_device, ctx.render_pass, nil)
