@@ -3,7 +3,7 @@ package main
 import "base:runtime"
 import "core:fmt"
 import "core:log"
-import "core:math/linalg"
+// import "core:math/linalg"
 import "core:mem"
 import "core:os"
 import "core:reflect"
@@ -30,6 +30,8 @@ AppContext :: struct {
     image_available_semaphores: []vk.Semaphore, // 16
     in_flight_fences:           []vk.Fence, // 16
     // all others
+    vertex_buffer:              vk.Buffer,
+    vertex_buffer_mem:          vk.DeviceMemory,
     command_pool:               vk.CommandPool,
     dbg_messenger:              vk.DebugUtilsMessengerEXT,
     instance:                   vk.Instance,
@@ -164,6 +166,7 @@ init_vulkan :: proc(ctx: ^AppContext) {
     create_graphics_pipeline(ctx)
     create_framebuffers(ctx)
     create_command_pool(ctx)
+    create_vertex_buffer(ctx)
     create_command_buffers(ctx)
     create_sync_objects(ctx)
 
@@ -212,16 +215,8 @@ create_instance :: proc(ctx: ^AppContext) {
 
     instance_extension_count: u32
     vk.EnumerateInstanceExtensionProperties(nil, &instance_extension_count, nil)
-    instance_extensions := make(
-        []vk.ExtensionProperties,
-        instance_extension_count,
-        context.temp_allocator,
-    )
-    vk.EnumerateInstanceExtensionProperties(
-        nil,
-        &instance_extension_count,
-        raw_data(instance_extensions),
-    )
+    instance_extensions := make([]vk.ExtensionProperties, instance_extension_count, context.temp_allocator)
+    vk.EnumerateInstanceExtensionProperties(nil, &instance_extension_count, raw_data(instance_extensions))
     // need "addressable semantics" in this loop in order to cast values from the iterable value
     // pass the iterable value by pointer in order to accomplish that
     // (and use the cstring cast since the strings from Vulkan are cstrings, i.e. null terminated)
@@ -393,22 +388,13 @@ is_device_suitable :: proc(device: vk.PhysicalDevice, ctx: ^AppContext) -> b32 {
     swap_chain_adequate: bool
     if extensions_supported {
         swap_chain_support := query_swapchain_support(device, ctx)
-        swap_chain_adequate =
-            len(swap_chain_support.formats) != 0 && len(swap_chain_support.present_modes) != 0
+        swap_chain_adequate = len(swap_chain_support.formats) != 0 && len(swap_chain_support.present_modes) != 0
     }
 
-    return(
-        b32(has_graphics) &&
-        b32(has_present) &&
-        b32(extensions_supported) &&
-        swap_chain_adequate \
-    )
+    return b32(has_graphics) && b32(has_present) && b32(extensions_supported) && swap_chain_adequate
 }
 
-find_queue_families :: proc(
-    device: vk.PhysicalDevice,
-    ctx: ^AppContext,
-) -> QueueFamilyIndicies {
+find_queue_families :: proc(device: vk.PhysicalDevice, ctx: ^AppContext) -> QueueFamilyIndicies {
     indicies: QueueFamilyIndicies
     present_support: b32
 
@@ -421,12 +407,7 @@ find_queue_families :: proc(
     for fam, i in queue_families {
         if .GRAPHICS in fam.queueFlags {
             indicies.graphics_family = u32(i)
-            vk.GetPhysicalDeviceSurfaceSupportKHR(
-                device,
-                u32(i),
-                ctx.surface,
-                &present_support,
-            )
+            vk.GetPhysicalDeviceSurfaceSupportKHR(device, u32(i), ctx.surface, &present_support)
             if present_support do indicies.present_family = u32(i)
         }
     }
@@ -512,10 +493,7 @@ check_device_extension_support :: proc(device: vk.PhysicalDevice) -> bool {
     return len(required_extensions) == 0
 }
 
-query_swapchain_support :: proc(
-    device: vk.PhysicalDevice,
-    ctx: ^AppContext,
-) -> SwapchainSupportDetails {
+query_swapchain_support :: proc(device: vk.PhysicalDevice, ctx: ^AppContext) -> SwapchainSupportDetails {
     details: SwapchainSupportDetails
 
     vk.GetPhysicalDeviceSurfaceCapabilitiesKHR(device, ctx.surface, &details.capabilities)
@@ -524,22 +502,13 @@ query_swapchain_support :: proc(
     vk.GetPhysicalDeviceSurfaceFormatsKHR(device, ctx.surface, &format_count, nil)
     if format_count != 0 {
         details.formats = make([]vk.SurfaceFormatKHR, format_count, context.temp_allocator)
-        vk.GetPhysicalDeviceSurfaceFormatsKHR(
-            device,
-            ctx.surface,
-            &format_count,
-            raw_data(details.formats),
-        )
+        vk.GetPhysicalDeviceSurfaceFormatsKHR(device, ctx.surface, &format_count, raw_data(details.formats))
     }
 
     present_count: u32
     vk.GetPhysicalDeviceSurfacePresentModesKHR(device, ctx.surface, &present_count, nil)
     if present_count != 0 {
-        details.present_modes = make(
-            []vk.PresentModeKHR,
-            present_count,
-            context.temp_allocator,
-        )
+        details.present_modes = make([]vk.PresentModeKHR, present_count, context.temp_allocator)
         vk.GetPhysicalDeviceSurfacePresentModesKHR(
             device,
             ctx.surface,
@@ -551,9 +520,7 @@ query_swapchain_support :: proc(
     return details
 }
 
-choose_swap_surface_format :: proc(
-    available_formats: []vk.SurfaceFormatKHR,
-) -> vk.SurfaceFormatKHR {
+choose_swap_surface_format :: proc(available_formats: []vk.SurfaceFormatKHR) -> vk.SurfaceFormatKHR {
     for av_f in available_formats {
         if av_f.format == .B8G8R8A8_SRGB && av_f.colorSpace == .SRGB_NONLINEAR {
             return av_f
@@ -562,9 +529,7 @@ choose_swap_surface_format :: proc(
     return available_formats[0]
 }
 
-choose_swap_present_mode :: proc(
-    available_present_modes: []vk.PresentModeKHR,
-) -> vk.PresentModeKHR {
+choose_swap_present_mode :: proc(available_present_modes: []vk.PresentModeKHR) -> vk.PresentModeKHR {
 
     for av_p in available_present_modes {
         if av_p == .MAILBOX {
@@ -574,10 +539,7 @@ choose_swap_present_mode :: proc(
     return vk.PresentModeKHR.FIFO
 }
 
-choose_swap_extent :: proc(
-    capabilities: vk.SurfaceCapabilitiesKHR,
-    ctx: ^AppContext,
-) -> vk.Extent2D {
+choose_swap_extent :: proc(capabilities: vk.SurfaceCapabilitiesKHR, ctx: ^AppContext) -> vk.Extent2D {
     // swap extent is the resolution of the swap chain images
     // is usually exactly equal to the resolution of the window that is being drawn to, in pixels
 
@@ -653,12 +615,7 @@ create_swap_chain :: proc(ctx: ^AppContext) {
     swp_image_count: u32
     vk.GetSwapchainImagesKHR(ctx.logical_device, ctx.swapchain, &swp_image_count, nil)
     ctx.swapchain_images = make([]vk.Image, image_count)
-    vk.GetSwapchainImagesKHR(
-        ctx.logical_device,
-        ctx.swapchain,
-        &swp_image_count,
-        raw_data(ctx.swapchain_images),
-    )
+    vk.GetSwapchainImagesKHR(ctx.logical_device, ctx.swapchain, &swp_image_count, raw_data(ctx.swapchain_images))
 
     ctx.swapchain_extent = extent
     ctx.swapchain_image_format = surface_format.format
@@ -709,12 +666,7 @@ create_image_views :: proc(ctx: ^AppContext) {
                 layerCount = 1,
             },
         }
-        result := vk.CreateImageView(
-            ctx.logical_device,
-            &create_info,
-            nil,
-            &ctx.swapchain_image_views[i],
-        )
+        result := vk.CreateImageView(ctx.logical_device, &create_info, nil, &ctx.swapchain_image_views[i])
         log.assertf(result == .SUCCESS, "Failed to create image views with result: %v", result)
     }
 }
@@ -805,10 +757,7 @@ create_graphics_pipeline :: proc(ctx: ^AppContext) {
         pName  = "main",
     }
 
-    shader_stages: []vk.PipelineShaderStageCreateInfo = {
-        vert_shader_stage_info,
-        frag_shader_stage_info,
-    }
+    shader_stages: []vk.PipelineShaderStageCreateInfo = {vert_shader_stage_info, frag_shader_stage_info}
 
     // Fixed functions setup
     // ----------------------------------------------------------------------------
@@ -820,18 +769,8 @@ create_graphics_pipeline :: proc(ctx: ^AppContext) {
         inputRate = .VERTEX,
     }
     vertex_attribute_descriptions := [?]vk.VertexInputAttributeDescription {
-        {
-            binding = 0,
-            location = 0,
-            format = .R32G32_SFLOAT,
-            offset = cast(u32)offset_of(Vertex, pos),
-        },
-        {
-            binding = 0,
-            location = 1,
-            format = .R32G32B32_SFLOAT,
-            offset = cast(u32)offset_of(Vertex, color),
-        },
+        {binding = 0, location = 0, format = .R32G32_SFLOAT, offset = cast(u32)offset_of(Vertex, pos)},
+        {binding = 0, location = 1, format = .R32G32B32_SFLOAT, offset = cast(u32)offset_of(Vertex, color)},
     }
     // vertext input
     vertex_input_info := vk.PipelineVertexInputStateCreateInfo {
@@ -980,11 +919,7 @@ create_graphics_pipeline :: proc(ctx: ^AppContext) {
         nil,
         &ctx.pipeline,
     )
-    log.assertf(
-        result_pipeline == .SUCCESS,
-        "Failed to create pipeline with result: %v",
-        result_pipeline,
-    )
+    log.assertf(result_pipeline == .SUCCESS, "Failed to create pipeline with result: %v", result_pipeline)
 
     vk.DestroyShaderModule(ctx.logical_device, frag_shader_module, nil)
     vk.DestroyShaderModule(ctx.logical_device, vert_shader_module, nil)
@@ -1022,18 +957,8 @@ create_framebuffers :: proc(ctx: ^AppContext) {
             layers          = 1,
         }
 
-        result := vk.CreateFramebuffer(
-            ctx.logical_device,
-            &frame_buffer_info,
-            nil,
-            &ctx.swapchain_framebuffers[i],
-        )
-        log.assertf(
-            result == .SUCCESS,
-            "Failed to create framebuffer for index %v with result: %v",
-            i,
-            result,
-        )
+        result := vk.CreateFramebuffer(ctx.logical_device, &frame_buffer_info, nil, &ctx.swapchain_framebuffers[i])
+        log.assertf(result == .SUCCESS, "Failed to create framebuffer for index %v with result: %v", i, result)
     }
 }
 // ========================================= VULKAN COMMANDS =========================================
@@ -1059,16 +984,8 @@ create_command_buffers :: proc(ctx: ^AppContext) {
         commandBufferCount = u32(len(ctx.command_buffers)),
     }
 
-    result := vk.AllocateCommandBuffers(
-        ctx.logical_device,
-        &alloc_info,
-        raw_data(ctx.command_buffers),
-    )
-    log.assertf(
-        result == .SUCCESS,
-        "Failed to allocate command buffers with result: %v",
-        result,
-    )
+    result := vk.AllocateCommandBuffers(ctx.logical_device, &alloc_info, raw_data(ctx.command_buffers))
+    log.assertf(result == .SUCCESS, "Failed to allocate command buffers with result: %v", result)
 }
 
 record_command_buffer :: proc(
@@ -1128,11 +1045,7 @@ record_command_buffer :: proc(
     vk.CmdEndRenderPass(buffer)
 
     result_command_end := vk.EndCommandBuffer(buffer)
-    log.assertf(
-        result_command_end == .SUCCESS,
-        "Failed to end recording commands with result: %v",
-        result_command_end,
-    )
+    log.assertf(result_command_end == .SUCCESS, "Failed to end recording commands with result: %v", result_command_end)
 }
 // ========================================= VULKAN DRAWING =========================================
 /*
@@ -1171,17 +1084,10 @@ create_sync_objects :: proc(ctx: ^AppContext) {
             nil,
             &ctx.render_finished_semaphores[i],
         )
-        result_fence := vk.CreateFence(
-            ctx.logical_device,
-            &fence_info,
-            nil,
-            &ctx.in_flight_fences[i],
-        )
+        result_fence := vk.CreateFence(ctx.logical_device, &fence_info, nil, &ctx.in_flight_fences[i])
 
         log.assertf(
-            result_render_semaphore == .SUCCESS &&
-            result_img_semaphore == .SUCCESS &&
-            result_fence == .SUCCESS,
+            result_render_semaphore == .SUCCESS && result_img_semaphore == .SUCCESS && result_fence == .SUCCESS,
             "Failed to create a sync obj with result: %v, %v %v",
             result_render_semaphore,
             result_img_semaphore,
@@ -1193,13 +1099,7 @@ create_sync_objects :: proc(ctx: ^AppContext) {
 }
 
 draw_frame :: proc(ctx: ^AppContext) {
-    vk.WaitForFences(
-        ctx.logical_device,
-        u32(1),
-        &ctx.in_flight_fences[ctx.current_frame],
-        b32(true),
-        max(u64),
-    )
+    vk.WaitForFences(ctx.logical_device, u32(1), &ctx.in_flight_fences[ctx.current_frame], b32(true), max(u64))
 
     image_index: u32
     result_acquire := vk.AcquireNextImageKHR(
@@ -1245,17 +1145,8 @@ draw_frame :: proc(ctx: ^AppContext) {
         pSignalSemaphores    = &ctx.render_finished_semaphores[ctx.current_frame],
     }
 
-    result_submit := vk.QueueSubmit(
-        ctx.graphics_queue,
-        1,
-        &submit_info,
-        ctx.in_flight_fences[ctx.current_frame],
-    )
-    log.assertf(
-        result_submit == .SUCCESS,
-        "Failed to submit draw command buffer with result: %v",
-        result_submit,
-    )
+    result_submit := vk.QueueSubmit(ctx.graphics_queue, 1, &submit_info, ctx.in_flight_fences[ctx.current_frame])
+    log.assertf(result_submit == .SUCCESS, "Failed to submit draw command buffer with result: %v", result_submit)
 
     present_info := vk.PresentInfoKHR {
         sType              = .PRESENT_INFO_KHR,
@@ -1275,6 +1166,50 @@ draw_frame :: proc(ctx: ^AppContext) {
     // )
 
     ctx.current_frame = (ctx.current_frame + 1) % MAX_FRAMES_IN_FLIGHT
+}
+// ========================================= VULKAN VERTEXT BUFFER =========================================
+create_vertex_buffer :: proc(ctx: ^AppContext) {
+    buffer_info := vk.BufferCreateInfo {
+        sType       = .BUFFER_CREATE_INFO,
+        size        = vk.DeviceSize(size_of(vertices[0]) * len(vertices)),
+        usage       = {.VERTEX_BUFFER},
+        sharingMode = .EXCLUSIVE,
+    }
+
+    result_buffer_create := vk.CreateBuffer(ctx.logical_device, &buffer_info, nil, &ctx.vertex_buffer)
+    log.assertf(
+        result_buffer_create == .SUCCESS,
+        "Failed to create vertext buffer with result: %v",
+        result_buffer_create,
+    )
+
+    mem_reqs: vk.MemoryRequirements
+    vk.GetBufferMemoryRequirements(ctx.logical_device, ctx.vertex_buffer, &mem_reqs)
+
+    alloc_info := vk.MemoryAllocateInfo {
+        sType           = .MEMORY_ALLOCATE_INFO,
+        allocationSize  = mem_reqs.size,
+        memoryTypeIndex = find_memory_type(ctx, mem_reqs.memoryTypeBits, {.HOST_VISIBLE, .HOST_COHERENT}),
+    }
+
+    result_buffer_alloc := vk.AllocateMemory(ctx.logical_device, &alloc_info, nil, &ctx.vertex_buffer_mem)
+    log.assertf(
+        result_buffer_alloc == .SUCCESS,
+        "Failed to allocate vertext buffer memory with result: %v",
+        result_buffer_alloc,
+    )
+}
+
+find_memory_type :: proc(ctx: ^AppContext, type_filter: u32, props: vk.MemoryPropertyFlags) -> u32 {
+    mem_props: vk.PhysicalDeviceMemoryProperties
+    vk.GetPhysicalDeviceMemoryProperties(ctx.phys_device, &mem_props)
+
+    for i in 0 ..< mem_props.memoryTypeCount {
+        if (type_filter & (1 << i) != 0) && (mem_props.memoryTypes[i].propertyFlags & props) == props {
+            return i
+        }
+    }
+    panic("Failed to find suitable memory type!")
 }
 // ========================================= WINDOW =========================================
 init_window :: proc(ctx: ^AppContext) {
@@ -1301,6 +1236,7 @@ init_window :: proc(ctx: ^AppContext) {
 cleanup :: proc(ctx: ^AppContext) {
     cleanup_swap_chain(ctx)
 
+    vk.DestroyBuffer(ctx.logical_device, ctx.vertext_buffer, nil)
     vk.DestroyPipeline(ctx.logical_device, ctx.pipeline, nil)
     vk.DestroyPipelineLayout(ctx.logical_device, ctx.pipeline_layout, nil)
     vk.DestroyRenderPass(ctx.logical_device, ctx.render_pass, nil)
