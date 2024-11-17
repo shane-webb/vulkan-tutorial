@@ -1,9 +1,12 @@
 package main
 
 import "base:runtime"
+import "core:fmt"
 import "core:log"
+import "core:math/linalg"
 import "core:mem"
 import "core:os"
+import "core:reflect"
 import SDL "vendor:sdl2"
 import vk "vendor:vulkan"
 
@@ -15,30 +18,44 @@ GLOBAL_RUNTIME_CONTEXT: runtime.Context
 VK_NULL_HANDLE :: 0
 
 AppContext :: struct {
-    command_buffers:            []vk.CommandBuffer,
+    // hot accesses
+    current_frame:              u32, // 4
+    frame_buffere_resized:      bool, // 1
+    // large and frequently accessed
+    command_buffers:            []vk.CommandBuffer, // 16
+    swapchain_framebuffers:     []vk.Framebuffer, // 16
+    swapchain_images:           []vk.Image, // 16
+    swapchain_image_views:      []vk.ImageView, // 16
+    render_finished_semaphores: []vk.Semaphore, // 16
+    image_available_semaphores: []vk.Semaphore, // 16
+    in_flight_fences:           []vk.Fence, // 16
+    // all others
     command_pool:               vk.CommandPool,
-    current_frame:              u32,
     dbg_messenger:              vk.DebugUtilsMessengerEXT,
-    frame_buffere_resized:      bool,
     instance:                   vk.Instance,
-    image_available_semaphores: []vk.Semaphore,
-    in_flight_fences:           []vk.Fence,
     graphics_queue:             vk.Queue,
     logical_device:             vk.Device,
     phys_device:                vk.PhysicalDevice,
     pipeline:                   vk.Pipeline,
     pipeline_layout:            vk.PipelineLayout,
-    present_queue:              vk.Queue,
-    render_finished_semaphores: []vk.Semaphore,
-    render_pass:                vk.RenderPass,
-    surface:                    vk.SurfaceKHR,
-    swapchain:                  vk.SwapchainKHR,
-    swapchain_extent:           vk.Extent2D,
-    swapchain_framebuffers:     []vk.Framebuffer,
-    swapchain_images:           []vk.Image,
-    swapchain_image_format:     vk.Format,
-    swapchain_image_views:      []vk.ImageView,
-    window:                     ^SDL.Window,
+    present_queue:              vk.Queue, //8
+    render_pass:                vk.RenderPass, // 8
+    surface:                    vk.SurfaceKHR, // 8
+    swapchain:                  vk.SwapchainKHR, // 8
+    swapchain_extent:           vk.Extent2D, // 8
+    window:                     ^SDL.Window, // 8
+    swapchain_image_format:     vk.Format, // 4
+}
+
+Vertex :: struct {
+    pos:   [2]f32,
+    color: [3]f32,
+}
+
+vertices := []Vertex {
+    {pos = {0.0, -0.5}, color = {1.0, 0.0, 0.0}},
+    {pos = {0.5, 0.5}, color = {0.0, 1.0, 0.0}},
+    {pos = {-0.5, 0.5}, color = {0.0, 0.0, 1.0}},
 }
 
 // bundled to simplify querying for the different families at different times
@@ -99,6 +116,8 @@ main :: proc() {
     init_window(&ctx)
 
     init_vulkan(&ctx)
+
+    // print_struct_sizes(&ctx)
 
     loop: for {     // labeled control flow
         event: SDL.Event
@@ -794,13 +813,33 @@ create_graphics_pipeline :: proc(ctx: ^AppContext) {
     // Fixed functions setup
     // ----------------------------------------------------------------------------
 
+    // these two would normally not be filled in like this I think...
+    vertex_binding_description := vk.VertexInputBindingDescription {
+        binding   = 0,
+        stride    = size_of(Vertex),
+        inputRate = .VERTEX,
+    }
+    vertex_attribute_descriptions := [?]vk.VertexInputAttributeDescription {
+        {
+            binding = 0,
+            location = 0,
+            format = .R32G32_SFLOAT,
+            offset = cast(u32)offset_of(Vertex, pos),
+        },
+        {
+            binding = 0,
+            location = 1,
+            format = .R32G32B32_SFLOAT,
+            offset = cast(u32)offset_of(Vertex, color),
+        },
+    }
     // vertext input
     vertex_input_info := vk.PipelineVertexInputStateCreateInfo {
         sType                           = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-        vertexBindingDescriptionCount   = 0,
-        pVertexBindingDescriptions      = nil,
-        vertexAttributeDescriptionCount = 0,
-        pVertexAttributeDescriptions    = nil,
+        vertexBindingDescriptionCount   = 1,
+        pVertexBindingDescriptions      = &vertex_binding_description,
+        vertexAttributeDescriptionCount = len(vertex_attribute_descriptions),
+        pVertexAttributeDescriptions    = raw_data(&vertex_attribute_descriptions),
     }
 
     // input_assembly
@@ -1292,4 +1331,16 @@ cleanup :: proc(ctx: ^AppContext) {
     delete(ctx.swapchain_images)
 
     SDL.Quit()
+}
+
+print_struct_sizes :: proc(ctx: ^AppContext) {
+    id := typeid_of(AppContext)
+    count := reflect.struct_field_count(AppContext)
+    offset := reflect.struct_field_offsets(id)
+    zipped := reflect.struct_fields_zipped(id)
+
+    fmt.println("id: ", id)
+    fmt.println("count: ", count)
+    fmt.printfln("offsets: %#v", offset)
+    fmt.printfln("zipped: %#v", zipped)
 }
