@@ -1175,12 +1175,65 @@ draw_frame :: proc(ctx: ^AppContext) {
 
     ctx.current_frame = (ctx.current_frame + 1) % MAX_FRAMES_IN_FLIGHT
 }
-// ========================================= VULKAN VERTEXT BUFFER =========================================
+// ========================================= VULKAN VERTEXT BUFFERS =========================================
 create_vertex_buffer :: proc(ctx: ^AppContext) {
+    buffer_size := vk.DeviceSize(size_of(vertices[0]) * len(vertices))
+    staging_buffer: vk.Buffer
+    staging_buffer_mem: vk.DeviceMemory
+
+    create_buffer(
+        ctx,
+        buffer_size,
+        {.TRANSFER_SRC},
+        {.HOST_VISIBLE, .HOST_COHERENT},
+        &staging_buffer,
+        &staging_buffer_mem,
+    )
+
+    data: rawptr
+    vk.MapMemory(ctx.logical_device, staging_buffer_mem, 0, buffer_size, {}, &data)
+    mem.copy(data, raw_data(vertices), int(buffer_size))
+    vk.UnmapMemory(ctx.logical_device, staging_buffer_mem)
+
+    create_buffer(
+        ctx,
+        buffer_size,
+        {.TRANSFER_DST, .VERTEX_BUFFER},
+        {.DEVICE_LOCAL},
+        &ctx.vertex_buffer,
+        &ctx.vertex_buffer_mem,
+    )
+    copy_buffer(ctx, staging_buffer, ctx.vertex_buffer, buffer_size)
+
+    vk.DestroyBuffer(ctx.logical_device, staging_buffer, nil)
+    vk.FreeMemory(ctx.logical_device, staging_buffer_mem, nil)
+}
+
+// ========================================= VULKAN GENERAL BUFFERS =========================================
+find_memory_type :: proc(ctx: ^AppContext, type_filter: u32, props: vk.MemoryPropertyFlags) -> u32 {
+    mem_props: vk.PhysicalDeviceMemoryProperties
+    vk.GetPhysicalDeviceMemoryProperties(ctx.phys_device, &mem_props)
+
+    for i in 0 ..< mem_props.memoryTypeCount {
+        if (type_filter & (1 << i) != 0) && (mem_props.memoryTypes[i].propertyFlags & props) == props {
+            return i
+        }
+    }
+    panic("Failed to find suitable memory type!")
+}
+
+create_buffer :: proc(
+    ctx: ^AppContext,
+    size: vk.DeviceSize,
+    usage: vk.BufferUsageFlags,
+    props: vk.MemoryPropertyFlags,
+    buffer: ^vk.Buffer,
+    buffer_mem: ^vk.DeviceMemory,
+) {
     buffer_info := vk.BufferCreateInfo {
         sType       = .BUFFER_CREATE_INFO,
-        size        = vk.DeviceSize(size_of(vertices[0]) * len(vertices)),
-        usage       = {.VERTEX_BUFFER},
+        size        = size,
+        usage       = usage,
         sharingMode = .EXCLUSIVE,
     }
 
@@ -1208,22 +1261,42 @@ create_vertex_buffer :: proc(ctx: ^AppContext) {
     )
     vk.BindBufferMemory(ctx.logical_device, ctx.vertex_buffer, ctx.vertex_buffer_mem, 0)
 
-    data: rawptr
-    vk.MapMemory(ctx.logical_device, ctx.vertex_buffer_mem, 0, buffer_info.size, {}, &data)
-    mem.copy(data, raw_data(vertices), int(buffer_info.size))
-    vk.UnmapMemory(ctx.logical_device, ctx.vertex_buffer_mem)
 }
 
-find_memory_type :: proc(ctx: ^AppContext, type_filter: u32, props: vk.MemoryPropertyFlags) -> u32 {
-    mem_props: vk.PhysicalDeviceMemoryProperties
-    vk.GetPhysicalDeviceMemoryProperties(ctx.phys_device, &mem_props)
-
-    for i in 0 ..< mem_props.memoryTypeCount {
-        if (type_filter & (1 << i) != 0) && (mem_props.memoryTypes[i].propertyFlags & props) == props {
-            return i
-        }
+copy_buffer :: proc(ctx: ^AppContext, src_buffer: vk.Buffer, dst_buffer: vk.Buffer, size: vk.DeviceSize) {
+    // TODO: create a separate command pool for short-lived buffers? An "arena" pool?
+    alloc_info := vk.CommandBufferAllocateInfo {
+        sType              = .COMMAND_BUFFER_ALLOCATE_INFO,
+        level              = .PRIMARY,
+        commandPool        = ctx.command_pool,
+        commandBufferCount = 1,
     }
-    panic("Failed to find suitable memory type!")
+
+    copy_cmd_buffer: vk.CommandBuffer
+    vk.AllocateCommandBuffers(ctx.logical_device, &alloc_info, &copy_cmd_buffer)
+
+    begin_info := vk.CommandBufferBeginInfo {
+        sType = .COMMAND_BUFFER_BEGIN_INFO,
+        flags = {.ONE_TIME_SUBMIT},
+    }
+    vk.BeginCommandBuffer(copy_cmd_buffer, &begin_info)
+    {
+        copy_region := vk.BufferCopy {
+            size = size,
+        }
+        vk.CmdCopyBuffer(copy_cmd_buffer, src_buffer, dst_buffer, 1, &copy_region)
+    }
+    vk.EndCommandBuffer(copy_cmd_buffer)
+
+    submit_info := vk.SubmitInfo {
+        sType              = .SUBMIT_INFO,
+        commandBufferCount = 1,
+        pCommandBuffers    = &copy_cmd_buffer,
+    }
+
+    vk.QueueSubmit(ctx.graphics_queue, 1, &submit_info, VK_NULL_HANDLE)
+    vk.QueueWaitIdle(ctx.graphics_queue)
+    vk.FreeCommandBuffers(ctx.logical_device, ctx.command_pool, 1, &copy_cmd_buffer)
 }
 // ========================================= WINDOW =========================================
 init_window :: proc(ctx: ^AppContext) {
