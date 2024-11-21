@@ -32,6 +32,8 @@ AppContext :: struct {
     // all others
     vertex_buffer:              vk.Buffer,
     vertex_buffer_mem:          vk.DeviceMemory,
+    index_buffer:               vk.Buffer,
+    index_buffer_mem:           vk.DeviceMemory,
     command_pool:               vk.CommandPool,
     dbg_messenger:              vk.DebugUtilsMessengerEXT,
     instance:                   vk.Instance,
@@ -55,10 +57,13 @@ Vertex :: struct {
 }
 
 vertices := []Vertex {
-    {pos = {0.0, -0.5}, color = {1.0, 0.0, 0.0}},
-    {pos = {0.5, 0.5}, color = {0.0, 1.0, 0.0}},
-    {pos = {-0.5, 0.5}, color = {0.0, 0.0, 1.0}},
+    {pos = {-0.5, -0.5}, color = {1.0, 0.0, 0.0}},
+    {pos = {0.5, -0.5}, color = {0.0, 1.0, 0.0}},
+    {pos = {0.5, 0.5}, color = {0.0, 0.0, 1.0}},
+    {pos = {-0.5, 0.5}, color = {1.0, 1.0, 1.0}},
 }
+
+indices := []u16{0, 1, 2, 2, 3, 0}
 
 // bundled to simplify querying for the different families at different times
 // wrapped with Maybe because 0 is technically a valid queue family value
@@ -167,6 +172,7 @@ init_vulkan :: proc(ctx: ^AppContext) {
     create_framebuffers(ctx)
     create_command_pool(ctx)
     create_vertex_buffer(ctx)
+    create_index_buffer(ctx)
     create_command_buffers(ctx)
     create_sync_objects(ctx)
 
@@ -991,6 +997,7 @@ create_command_buffers :: proc(ctx: ^AppContext) {
 record_command_buffer :: proc(
     cmd_buffer: vk.CommandBuffer,
     vertex_buffer: vk.Buffer,
+    index_buffer: vk.Buffer,
     image_index: u32,
     render_pass: vk.RenderPass,
     swap_chain_framebuffers: []vk.Framebuffer,
@@ -1046,8 +1053,9 @@ record_command_buffer :: proc(
         offsets := []vk.DeviceSize{0}
         vk.CmdBindVertexBuffers(cmd_buffer, 0, 1, raw_data(vertex_buffers), raw_data(offsets))
 
+        vk.CmdBindIndexBuffer(cmd_buffer, index_buffer, 0, .UINT16)
 
-        vk.CmdDraw(cmd_buffer, u32(len(vertices)), u32(1), u32(0), u32(0))
+        vk.CmdDrawIndexed(cmd_buffer, u32(len(indices)), 1, 0, 0, 0)
     }
     vk.CmdEndRenderPass(cmd_buffer)
 
@@ -1134,6 +1142,7 @@ draw_frame :: proc(ctx: ^AppContext) {
     record_command_buffer(
         ctx.command_buffers[ctx.current_frame],
         ctx.vertex_buffer,
+        ctx.index_buffer,
         image_index,
         ctx.render_pass,
         ctx.swapchain_framebuffers,
@@ -1243,8 +1252,6 @@ create_buffer :: proc(
     log.assertf(result_buffer_create == .SUCCESS, "Failed to create buffer with result: %v", result_buffer_create)
 
     mem_reqs: vk.MemoryRequirements
-    // NOTE: is this the source of the problem? 
-    // could maybe abstract the buffer to solve for this?
     vk.GetBufferMemoryRequirements(ctx.logical_device, buffer^, &mem_reqs)
 
     alloc_info := vk.MemoryAllocateInfo {
@@ -1253,6 +1260,9 @@ create_buffer :: proc(
         memoryTypeIndex = find_memory_type(ctx, mem_reqs.memoryTypeBits, properties),
     }
 
+    // NOTE: not a good idea to manually call alloc for every buffer created
+    // should instead use a custom allocator (arena style), or use a library
+    // like VulkanMemoryAllocator: https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator
     result_memory_alloc := vk.AllocateMemory(ctx.logical_device, &alloc_info, nil, buffer_mem)
     log.assertf(
         result_memory_alloc == .SUCCESS,
@@ -1302,6 +1312,41 @@ copy_buffer :: proc(ctx: ^AppContext, src_buffer: vk.Buffer, dst_buffer: vk.Buff
     vk.QueueWaitIdle(ctx.graphics_queue)
     vk.FreeCommandBuffers(ctx.logical_device, ctx.command_pool, 1, &command_buffer)
 }
+// ========================================= VULKAN INDEX BUFFER =========================================
+create_index_buffer :: proc(ctx: ^AppContext) {
+    buffer_size := vk.DeviceSize(size_of(indices[0]) * len(indices))
+
+    staging_buffer: vk.Buffer
+    staging_buffer_mem: vk.DeviceMemory
+
+    create_buffer(
+        ctx,
+        buffer_size,
+        {.TRANSFER_SRC},
+        {.HOST_VISIBLE, .HOST_COHERENT},
+        &staging_buffer,
+        &staging_buffer_mem,
+    )
+
+    data: rawptr
+    vk.MapMemory(ctx.logical_device, staging_buffer_mem, 0, buffer_size, {}, &data)
+    mem.copy(data, raw_data(indices), int(buffer_size))
+    vk.UnmapMemory(ctx.logical_device, staging_buffer_mem)
+
+    create_buffer(
+        ctx,
+        buffer_size,
+        {.TRANSFER_DST, .INDEX_BUFFER},
+        {.DEVICE_LOCAL},
+        &ctx.index_buffer,
+        &ctx.index_buffer_mem,
+    )
+
+    copy_buffer(ctx, staging_buffer, ctx.index_buffer, buffer_size)
+
+    vk.DestroyBuffer(ctx.logical_device, staging_buffer, nil)
+    vk.FreeMemory(ctx.logical_device, staging_buffer_mem, nil)
+}
 // ========================================= WINDOW =========================================
 init_window :: proc(ctx: ^AppContext) {
     SDL.Init({.VIDEO})
@@ -1326,6 +1371,9 @@ init_window :: proc(ctx: ^AppContext) {
 // ========================================= DESTRUCTION =========================================
 cleanup :: proc(ctx: ^AppContext) {
     cleanup_swap_chain(ctx)
+
+    vk.DestroyBuffer(ctx.logical_device, ctx.index_buffer, nil)
+    vk.FreeMemory(ctx.logical_device, ctx.index_buffer_mem, nil)
 
     vk.DestroyBuffer(ctx.logical_device, ctx.vertex_buffer, nil)
     vk.FreeMemory(ctx.logical_device, ctx.vertex_buffer_mem, nil)
