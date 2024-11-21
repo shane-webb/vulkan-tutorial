@@ -1175,42 +1175,21 @@ draw_frame :: proc(ctx: ^AppContext) {
 
     ctx.current_frame = (ctx.current_frame + 1) % MAX_FRAMES_IN_FLIGHT
 }
-// ========================================= VULKAN VERTEXT BUFFER =========================================
+// ========================================= VULKAN VERTEX BUFFER =========================================
 create_vertex_buffer :: proc(ctx: ^AppContext) {
-    buffer_info := vk.BufferCreateInfo {
-        sType       = .BUFFER_CREATE_INFO,
-        size        = vk.DeviceSize(size_of(vertices[0]) * len(vertices)),
-        usage       = {.VERTEX_BUFFER},
-        sharingMode = .EXCLUSIVE,
-    }
-
-    result_buffer_create := vk.CreateBuffer(ctx.logical_device, &buffer_info, nil, &ctx.vertex_buffer)
-    log.assertf(
-        result_buffer_create == .SUCCESS,
-        "Failed to create vertext buffer with result: %v",
-        result_buffer_create,
+    buffer_size := vk.DeviceSize(size_of(vertices[0]) * len(vertices))
+    create_buffer(
+        ctx,
+        buffer_size,
+        {.VERTEX_BUFFER},
+        {.HOST_VISIBLE, .HOST_COHERENT},
+        &ctx.vertex_buffer,
+        &ctx.vertex_buffer_mem,
     )
-
-    mem_reqs: vk.MemoryRequirements
-    vk.GetBufferMemoryRequirements(ctx.logical_device, ctx.vertex_buffer, &mem_reqs)
-
-    alloc_info := vk.MemoryAllocateInfo {
-        sType           = .MEMORY_ALLOCATE_INFO,
-        allocationSize  = mem_reqs.size,
-        memoryTypeIndex = find_memory_type(ctx, mem_reqs.memoryTypeBits, {.HOST_VISIBLE, .HOST_COHERENT}),
-    }
-
-    result_buffer_alloc := vk.AllocateMemory(ctx.logical_device, &alloc_info, nil, &ctx.vertex_buffer_mem)
-    log.assertf(
-        result_buffer_alloc == .SUCCESS,
-        "Failed to allocate vertext buffer memory with result: %v",
-        result_buffer_alloc,
-    )
-    vk.BindBufferMemory(ctx.logical_device, ctx.vertex_buffer, ctx.vertex_buffer_mem, 0)
 
     data: rawptr
-    vk.MapMemory(ctx.logical_device, ctx.vertex_buffer_mem, 0, buffer_info.size, {}, &data)
-    mem.copy(data, raw_data(vertices), int(buffer_info.size))
+    vk.MapMemory(ctx.logical_device, ctx.vertex_buffer_mem, 0, buffer_size, {}, &data)
+    mem.copy(data, raw_data(vertices), int(buffer_size))
     vk.UnmapMemory(ctx.logical_device, ctx.vertex_buffer_mem)
 }
 
@@ -1224,6 +1203,48 @@ find_memory_type :: proc(ctx: ^AppContext, type_filter: u32, props: vk.MemoryPro
         }
     }
     panic("Failed to find suitable memory type!")
+}
+
+create_buffer :: proc(
+    ctx: ^AppContext,
+    size: vk.DeviceSize,
+    usage: vk.BufferUsageFlags,
+    properties: vk.MemoryPropertyFlags,
+    buffer: ^vk.Buffer,
+    buffer_mem: ^vk.DeviceMemory,
+) {
+    buffer_mem := buffer_mem
+
+    create_info := vk.BufferCreateInfo {
+        sType       = .BUFFER_CREATE_INFO,
+        size        = size,
+        usage       = usage,
+        sharingMode = .EXCLUSIVE,
+    }
+
+    result_buffer_create := vk.CreateBuffer(ctx.logical_device, &create_info, nil, buffer)
+    log.assertf(result_buffer_create == .SUCCESS, "Failed to create buffer with result: %v", result_buffer_create)
+
+    mem_reqs: vk.MemoryRequirements
+    // NOTE: is this the source of the problem? 
+    // could maybe abstract the buffer to solve for this?
+    vk.GetBufferMemoryRequirements(ctx.logical_device, buffer^, &mem_reqs)
+
+    alloc_info := vk.MemoryAllocateInfo {
+        sType           = .MEMORY_ALLOCATE_INFO,
+        allocationSize  = mem_reqs.size,
+        memoryTypeIndex = find_memory_type(ctx, mem_reqs.memoryTypeBits, properties),
+    }
+
+    result_memory_alloc := vk.AllocateMemory(ctx.logical_device, &alloc_info, nil, buffer_mem)
+    log.assertf(
+        result_memory_alloc == .SUCCESS,
+        "Failed to allocate buffer memory with result: %v",
+        result_memory_alloc,
+    )
+
+    vk.BindBufferMemory(ctx.logical_device, buffer^, buffer_mem^, 0)
+
 }
 // ========================================= WINDOW =========================================
 init_window :: proc(ctx: ^AppContext) {
