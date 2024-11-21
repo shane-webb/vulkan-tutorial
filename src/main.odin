@@ -725,9 +725,9 @@ create_graphics_pipeline :: proc(ctx: ^AppContext) {
 
     // Shader modules setup
     // ----------------------------------------------------------------------------
-    vert_handle, vert_open_ok := os.open(".\\bin\\vert.spv")
+    vert_handle, vert_open_ok := os.open("C:/Users/shane/dev/vulkan_guide/bin/vert.spv")
     defer os.close(vert_handle)
-    frag_handle, frag_open_ok := os.open(".\\bin\\frag.spv")
+    frag_handle, frag_open_ok := os.open("C:/Users/shane/dev/vulkan_guide/bin/frag.spv")
     defer os.close(frag_handle)
     if vert_open_ok != nil || frag_open_ok != nil {
         log.panicf("Failed to open shader file - frag:%v\tvert:%v", frag_open_ok, vert_open_ok)

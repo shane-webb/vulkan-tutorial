@@ -10,8 +10,8 @@ if defined odin_args (
     echo compiling shaders
     .\bin\glslc.exe shaders\shader.vert -o bin\vert.spv
     .\bin\glslc.exe shaders\shader.frag -o bin\frag.spv
-    echo running odin run src -debug -out:bin/app.exe
-    odin run src -debug -out:./bin/app.exe
+    echo running odin run src -debug -out:bin/app.exe -pdb-name:/debug/app.pdb
+    odin run src -debug -out:./bin/app.exe -pdb-name:./debug/app.pdb
   ) else (
     echo Invalid argument: %odin_args%
     echo Available arguments: [-debug, -o:size]
