@@ -7,6 +7,7 @@ import "core:log"
 import "core:mem"
 import "core:os"
 import "core:reflect"
+import "core:time"
 import SDL "vendor:sdl2"
 import vk "vendor:vulkan"
 
@@ -22,6 +23,9 @@ AppContext :: struct {
     current_frame:              u32, // 4
     frame_buffere_resized:      bool, // 1
     // large and frequently accessed
+    uniform_buffers:            []vk.Buffer,
+    uniform_buffers_mem:        []vk.DeviceMemory,
+    uniform_buffers_mapped:     []rawptr,
     command_buffers:            []vk.CommandBuffer, // 16
     swapchain_framebuffers:     []vk.Framebuffer, // 16
     swapchain_images:           []vk.Image, // 16
@@ -41,6 +45,7 @@ AppContext :: struct {
     logical_device:             vk.Device,
     phys_device:                vk.PhysicalDevice,
     pipeline:                   vk.Pipeline,
+    descriptor_set_layout:      vk.DescriptorSetLayout,
     pipeline_layout:            vk.PipelineLayout,
     present_queue:              vk.Queue, //8
     render_pass:                vk.RenderPass, // 8
@@ -54,6 +59,12 @@ AppContext :: struct {
 Vertex :: struct {
     pos:   [2]f32,
     color: [3]f32,
+}
+
+UniformBufferObject :: struct {
+    model: matrix[4, 4]f32,
+    view:  matrix[4, 4]f32,
+    proj:  matrix[4, 4]f32,
 }
 
 vertices := []Vertex {
@@ -168,11 +179,13 @@ init_vulkan :: proc(ctx: ^AppContext) {
     create_swap_chain(ctx)
     create_image_views(ctx)
     create_render_pass(ctx)
+    create_descriptor_set_layout(ctx)
     create_graphics_pipeline(ctx)
     create_framebuffers(ctx)
     create_command_pool(ctx)
     create_vertex_buffer(ctx)
     create_index_buffer(ctx)
+    create_uniform_buffers(ctx)
     create_command_buffers(ctx)
     create_sync_objects(ctx)
 
@@ -879,8 +892,8 @@ create_graphics_pipeline :: proc(ctx: ^AppContext) {
     // pipeline layout
     pipeline_layout_info := vk.PipelineLayoutCreateInfo {
         sType                  = .PIPELINE_LAYOUT_CREATE_INFO,
-        setLayoutCount         = 0,
-        pSetLayouts            = nil,
+        setLayoutCount         = 1,
+        pSetLayouts            = &ctx.descriptor_set_layout,
         pushConstantRangeCount = 0,
         pPushConstantRanges    = nil,
     }
@@ -1150,6 +1163,8 @@ draw_frame :: proc(ctx: ^AppContext) {
         ctx.pipeline,
     )
 
+    update_uniform_buffer(ctx.current_frame)
+
     wait_stages := [?]vk.PipelineStageFlags{{.COLOR_ATTACHMENT_OUTPUT}}
     submit_info := vk.SubmitInfo {
         sType                = .SUBMIT_INFO,
@@ -1347,6 +1362,63 @@ create_index_buffer :: proc(ctx: ^AppContext) {
     vk.DestroyBuffer(ctx.logical_device, staging_buffer, nil)
     vk.FreeMemory(ctx.logical_device, staging_buffer_mem, nil)
 }
+// ========================================= VULKAN UNIFORM BUFFERS =========================================
+create_uniform_buffers :: proc(ctx: ^AppContext) {
+    buffer_size := vk.DeviceSize(size_of(UniformBufferObject))
+
+    ctx.uniform_buffers = make([]vk.Buffer, MAX_FRAMES_IN_FLIGHT)
+    ctx.uniform_buffers_mem = make([]vk.DeviceMemory, MAX_FRAMES_IN_FLIGHT)
+    ctx.uniform_buffers_mapped = make([]rawptr, MAX_FRAMES_IN_FLIGHT)
+
+    for i in 0 ..< MAX_FRAMES_IN_FLIGHT {
+        create_buffer(
+            ctx,
+            buffer_size,
+            {.UNIFORM_BUFFER},
+            {.HOST_VISIBLE, .HOST_COHERENT},
+            &ctx.uniform_buffers[i],
+            &ctx.uniform_buffers_mem[i],
+        )
+
+        // persistent mapping
+        vk.MapMemory(
+            ctx.logical_device,
+            ctx.uniform_buffers_mem[i],
+            0,
+            buffer_size,
+            {},
+            &ctx.uniform_buffers_mapped[i],
+        )
+    }
+}
+
+update_uniform_buffer :: proc(current_image: u32) {
+    start_time := time.now()
+    current_time := time.now()
+
+    delta := time.tick_lap_time
+}
+// ========================================= VULKAN DESCRIPTOR SET LAYOUT =========================================
+create_descriptor_set_layout :: proc(ctx: ^AppContext) {
+    ubo_layout_binding := vk.DescriptorSetLayoutBinding {
+        binding            = 0,
+        descriptorType     = .UNIFORM_BUFFER,
+        descriptorCount    = 1,
+        stageFlags         = {.VERTEX},
+        pImmutableSamplers = nil,
+    }
+
+    layout_info := vk.DescriptorSetLayoutCreateInfo {
+        sType        = .DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        bindingCount = 1,
+        pBindings    = &ubo_layout_binding,
+    }
+
+    result := vk.CreateDescriptorSetLayout(ctx.logical_device, &layout_info, nil, &ctx.descriptor_set_layout)
+    log.assertf(result == .SUCCESS, "Failed to create descriptor set layout with result: %v", result)
+
+
+}
 // ========================================= WINDOW =========================================
 init_window :: proc(ctx: ^AppContext) {
     SDL.Init({.VIDEO})
@@ -1381,6 +1453,13 @@ cleanup :: proc(ctx: ^AppContext) {
     vk.DestroyPipeline(ctx.logical_device, ctx.pipeline, nil)
     vk.DestroyPipelineLayout(ctx.logical_device, ctx.pipeline_layout, nil)
     vk.DestroyRenderPass(ctx.logical_device, ctx.render_pass, nil)
+
+    for i in 0 ..< MAX_FRAMES_IN_FLIGHT {
+        vk.DestroyBuffer(ctx.logical_device, ctx.uniform_buffers[i], nil)
+        vk.FreeMemory(ctx.logical_device, ctx.uniform_buffers_mem[i], nil)
+    }
+
+    vk.DestroyDescriptorSetLayout(ctx.logical_device, ctx.descriptor_set_layout, nil)
 
     for i in 0 ..< MAX_FRAMES_IN_FLIGHT {
         vk.DestroySemaphore(ctx.logical_device, ctx.render_finished_semaphores[i], nil)
