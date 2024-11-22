@@ -3,7 +3,7 @@ package main
 import "base:runtime"
 import "core:fmt"
 import "core:log"
-// import "core:math/linalg"
+import "core:math/linalg"
 import "core:mem"
 import "core:os"
 import "core:reflect"
@@ -62,9 +62,9 @@ Vertex :: struct {
 }
 
 UniformBufferObject :: struct {
-    model: matrix[4, 4]f32,
-    view:  matrix[4, 4]f32,
-    proj:  matrix[4, 4]f32,
+    model: linalg.Matrix4f32,
+    view:  linalg.Matrix4f32,
+    proj:  linalg.Matrix4f32,
 }
 
 vertices := []Vertex {
@@ -1392,11 +1392,31 @@ create_uniform_buffers :: proc(ctx: ^AppContext) {
     }
 }
 
-update_uniform_buffer :: proc(current_image: u32) {
-    start_time := time.now()
-    current_time := time.now()
+update_uniform_buffer :: proc(ctx: ^AppContext, current_image: u32) {
+    start_time := time.tick_now()
 
-    delta := time.tick_lap_time
+    delta := time.tick_lap_time(&start_time)
+    radians := f32(90.0) * f32(linalg.PI) / f32(180.0)
+    ubo: UniformBufferObject
+    ubo.model = linalg.matrix4_rotate_f32((f32(delta) * radians), linalg.Vector3f32{0.0, 0.0, 1.0})
+
+    ubo.view = linalg.matrix4_look_at_f32(
+        eye = linalg.Vector3f32{2.0, 2.0, 2.0},
+        centre = linalg.Vector3f32{0.0, 0.0, 0.0},
+        up = linalg.Vector3f32{0.0, 0.0, 1.0},
+    )
+
+    ubo.proj = linalg.matrix4_perspective_f32(
+        fovy = f32(45.0),
+        aspect = f32(ctx.swapchain_extent.width / ctx.swapchain_extent.height),
+        near = f32(0.1),
+        far = f32(10.0),
+    )
+
+    // flip y axis?
+    // ubo.proj[1][1] *= -1
+
+    mem.copy(ctx.uniform_buffers_mapped[current_image], &ubo, size_of(ubo))
 }
 // ========================================= VULKAN DESCRIPTOR SET LAYOUT =========================================
 create_descriptor_set_layout :: proc(ctx: ^AppContext) {
