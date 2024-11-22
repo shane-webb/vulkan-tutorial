@@ -7,6 +7,7 @@ import "core:math/linalg"
 import "core:mem"
 import "core:os"
 import "core:reflect"
+import "core:slice"
 import "core:time"
 import SDL "vendor:sdl2"
 import vk "vendor:vulkan"
@@ -33,12 +34,14 @@ AppContext :: struct {
     render_finished_semaphores: []vk.Semaphore, // 16
     image_available_semaphores: []vk.Semaphore, // 16
     in_flight_fences:           []vk.Fence, // 16
+    descriptor_sets:            []vk.DescriptorSet,
     // all others
     vertex_buffer:              vk.Buffer,
     vertex_buffer_mem:          vk.DeviceMemory,
     index_buffer:               vk.Buffer,
     index_buffer_mem:           vk.DeviceMemory,
     command_pool:               vk.CommandPool,
+    descriptor_pool:            vk.DescriptorPool,
     dbg_messenger:              vk.DebugUtilsMessengerEXT,
     instance:                   vk.Instance,
     graphics_queue:             vk.Queue,
@@ -186,6 +189,8 @@ init_vulkan :: proc(ctx: ^AppContext) {
     create_vertex_buffer(ctx)
     create_index_buffer(ctx)
     create_uniform_buffers(ctx)
+    create_descriptor_pool(ctx)
+    create_descriptor_sets(ctx)
     create_command_buffers(ctx)
     create_sync_objects(ctx)
 
@@ -847,7 +852,7 @@ create_graphics_pipeline :: proc(ctx: ^AppContext) {
         polygonMode             = .FILL,
         lineWidth               = f32(1.0),
         cullMode                = {.BACK},
-        frontFace               = .CLOCKWISE,
+        frontFace               = .COUNTER_CLOCKWISE,
         depthBiasEnable         = b32(false),
         depthBiasConstantFactor = f32(0.0),
         depthBiasClamp          = f32(0.0),
@@ -1007,16 +1012,7 @@ create_command_buffers :: proc(ctx: ^AppContext) {
     log.assertf(result == .SUCCESS, "Failed to allocate command buffers with result: %v", result)
 }
 
-record_command_buffer :: proc(
-    cmd_buffer: vk.CommandBuffer,
-    vertex_buffer: vk.Buffer,
-    index_buffer: vk.Buffer,
-    image_index: u32,
-    render_pass: vk.RenderPass,
-    swap_chain_framebuffers: []vk.Framebuffer,
-    swap_chain_extent: vk.Extent2D,
-    graphics_pipeline: vk.Pipeline,
-) {
+record_command_buffer :: proc(ctx: ^AppContext, cmd_buffer: vk.CommandBuffer, image_index: u32) {
     begin_info := vk.CommandBufferBeginInfo {
         sType            = .COMMAND_BUFFER_BEGIN_INFO,
         // flags            = {.ONE_TIME_SUBMIT},
@@ -1035,22 +1031,22 @@ record_command_buffer :: proc(
     }
     render_pass_info := vk.RenderPassBeginInfo {
         sType = .RENDER_PASS_BEGIN_INFO,
-        renderPass = render_pass,
-        framebuffer = swap_chain_framebuffers[image_index],
-        renderArea = {offset = {0, 0}, extent = swap_chain_extent},
+        renderPass = ctx.render_pass,
+        framebuffer = ctx.swapchain_framebuffers[image_index],
+        renderArea = {offset = {0, 0}, extent = ctx.swapchain_extent},
         clearValueCount = 1,
         pClearValues = &clear_color,
     }
 
     vk.CmdBeginRenderPass(cmd_buffer, &render_pass_info, .INLINE)
     {
-        vk.CmdBindPipeline(cmd_buffer, .GRAPHICS, graphics_pipeline)
+        vk.CmdBindPipeline(cmd_buffer, .GRAPHICS, ctx.pipeline)
 
         viewport := vk.Viewport {
             x        = f32(0.0),
             y        = f32(0.0),
-            width    = f32(swap_chain_extent.width),
-            height   = f32(swap_chain_extent.height),
+            width    = f32(ctx.swapchain_extent.width),
+            height   = f32(ctx.swapchain_extent.height),
             minDepth = f32(0.0),
             maxDepth = f32(1.0),
         }
@@ -1058,16 +1054,26 @@ record_command_buffer :: proc(
 
         scissor := vk.Rect2D {
             offset = {0, 0},
-            extent = swap_chain_extent,
+            extent = ctx.swapchain_extent,
         }
         vk.CmdSetScissor(cmd_buffer, u32(0), u32(1), &scissor)
 
-        vertex_buffers := []vk.Buffer{vertex_buffer}
+        vertex_buffers := []vk.Buffer{ctx.vertex_buffer}
         offsets := []vk.DeviceSize{0}
         vk.CmdBindVertexBuffers(cmd_buffer, 0, 1, raw_data(vertex_buffers), raw_data(offsets))
 
-        vk.CmdBindIndexBuffer(cmd_buffer, index_buffer, 0, .UINT16)
+        vk.CmdBindIndexBuffer(cmd_buffer, ctx.index_buffer, 0, .UINT16)
 
+        vk.CmdBindDescriptorSets(
+            cmd_buffer,
+            .GRAPHICS,
+            ctx.pipeline_layout,
+            0,
+            1,
+            &ctx.descriptor_sets[ctx.current_frame],
+            0,
+            nil,
+        )
         vk.CmdDrawIndexed(cmd_buffer, u32(len(indices)), 1, 0, 0, 0)
     }
     vk.CmdEndRenderPass(cmd_buffer)
@@ -1152,18 +1158,9 @@ draw_frame :: proc(ctx: ^AppContext) {
     vk.ResetFences(ctx.logical_device, u32(1), &ctx.in_flight_fences[ctx.current_frame])
     vk.ResetCommandBuffer(ctx.command_buffers[ctx.current_frame], {.RELEASE_RESOURCES})
 
-    record_command_buffer(
-        ctx.command_buffers[ctx.current_frame],
-        ctx.vertex_buffer,
-        ctx.index_buffer,
-        image_index,
-        ctx.render_pass,
-        ctx.swapchain_framebuffers,
-        ctx.swapchain_extent,
-        ctx.pipeline,
-    )
+    record_command_buffer(ctx, ctx.command_buffers[ctx.current_frame], image_index)
 
-    update_uniform_buffer(ctx.current_frame)
+    update_uniform_buffer(ctx, ctx.current_frame)
 
     wait_stages := [?]vk.PipelineStageFlags{{.COLOR_ATTACHMENT_OUTPUT}}
     submit_info := vk.SubmitInfo {
@@ -1414,11 +1411,11 @@ update_uniform_buffer :: proc(ctx: ^AppContext, current_image: u32) {
     )
 
     // flip y axis?
-    // ubo.proj[1][1] *= -1
+    ubo.proj[1][1] *= -1
 
     mem.copy(ctx.uniform_buffers_mapped[current_image], &ubo, size_of(ubo))
 }
-// ========================================= VULKAN DESCRIPTOR SET LAYOUT =========================================
+// ========================================= VULKAN DESCRIPTOR SETS =========================================
 create_descriptor_set_layout :: proc(ctx: ^AppContext) {
     ubo_layout_binding := vk.DescriptorSetLayoutBinding {
         binding            = 0,
@@ -1437,6 +1434,61 @@ create_descriptor_set_layout :: proc(ctx: ^AppContext) {
     result := vk.CreateDescriptorSetLayout(ctx.logical_device, &layout_info, nil, &ctx.descriptor_set_layout)
     log.assertf(result == .SUCCESS, "Failed to create descriptor set layout with result: %v", result)
 
+
+}
+
+create_descriptor_pool :: proc(ctx: ^AppContext) {
+    pool_size := vk.DescriptorPoolSize {
+        type            = .UNIFORM_BUFFER,
+        descriptorCount = u32(MAX_FRAMES_IN_FLIGHT),
+    }
+
+    pool_info := vk.DescriptorPoolCreateInfo {
+        sType         = .DESCRIPTOR_POOL_CREATE_INFO,
+        poolSizeCount = 1,
+        pPoolSizes    = &pool_size,
+        maxSets       = u32(MAX_FRAMES_IN_FLIGHT),
+    }
+    result := vk.CreateDescriptorPool(ctx.logical_device, &pool_info, nil, &ctx.descriptor_pool)
+    log.assertf(result == .SUCCESS, "Failed to create descriptor pool with result: %v", result)
+}
+
+create_descriptor_sets :: proc(ctx: ^AppContext) {
+    layouts := make([]vk.DescriptorSetLayout, MAX_FRAMES_IN_FLIGHT)
+    defer delete(layouts)
+    slice.fill(layouts, ctx.descriptor_set_layout)
+    alloc_info := vk.DescriptorSetAllocateInfo {
+        sType              = .DESCRIPTOR_SET_ALLOCATE_INFO,
+        descriptorPool     = ctx.descriptor_pool,
+        descriptorSetCount = u32(MAX_FRAMES_IN_FLIGHT),
+        pSetLayouts        = raw_data(layouts),
+    }
+    ctx.descriptor_sets = make([]vk.DescriptorSet, MAX_FRAMES_IN_FLIGHT)
+
+    result := vk.AllocateDescriptorSets(ctx.logical_device, &alloc_info, raw_data(ctx.descriptor_sets))
+    log.assertf(result == .SUCCESS, "Failed to allocate descriptor sets with result: %v", result)
+
+    for i in 0 ..< MAX_FRAMES_IN_FLIGHT {
+        buffer_info := vk.DescriptorBufferInfo {
+            buffer = ctx.uniform_buffers[i],
+            offset = 0,
+            range  = vk.DeviceSize(size_of(UniformBufferObject)),
+        }
+
+        descriptor_write := vk.WriteDescriptorSet {
+            sType            = .WRITE_DESCRIPTOR_SET,
+            dstSet           = ctx.descriptor_sets[i],
+            dstBinding       = 0,
+            dstArrayElement  = 0,
+            descriptorType   = .UNIFORM_BUFFER,
+            descriptorCount  = 1,
+            pBufferInfo      = &buffer_info,
+            pImageInfo       = nil,
+            pTexelBufferView = nil,
+        }
+
+        vk.UpdateDescriptorSets(ctx.logical_device, 1, &descriptor_write, 0, nil)
+    }
 
 }
 // ========================================= WINDOW =========================================
@@ -1479,6 +1531,7 @@ cleanup :: proc(ctx: ^AppContext) {
         vk.FreeMemory(ctx.logical_device, ctx.uniform_buffers_mem[i], nil)
     }
 
+    vk.DestroyDescriptorPool(ctx.logical_device, ctx.descriptor_pool, nil)
     vk.DestroyDescriptorSetLayout(ctx.logical_device, ctx.descriptor_set_layout, nil)
 
     for i in 0 ..< MAX_FRAMES_IN_FLIGHT {
@@ -1500,7 +1553,11 @@ cleanup :: proc(ctx: ^AppContext) {
     SDL.Vulkan_UnloadLibrary()
     SDL.DestroyWindow(ctx.window)
 
+    delete(ctx.uniform_buffers)
+    delete(ctx.uniform_buffers_mapped)
+    delete(ctx.uniform_buffers_mem)
     delete(ctx.command_buffers)
+    delete(ctx.descriptor_sets)
     delete(ctx.render_finished_semaphores)
     delete(ctx.image_available_semaphores)
     delete(ctx.in_flight_fences)
